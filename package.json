@@ -12,14 +12,20 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "icons": "node scripts/make-icons.mjs"
+    "icons": "node scripts/make-icons.mjs",
+    "tauri": "tauri",
+    "mac:dev": "tauri dev",
+    "mac:build": "tauri build",
+    "mac:test": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
+    "@tauri-apps/api": "^2.11.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
   "devDependencies": {
     "@playwright/test": "1.56.0",
+    "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^24.13.3",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

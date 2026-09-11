@@ -48,11 +48,107 @@ A few other decisions worth knowing:
 - **The service worker caches the app shell only** — never API responses. Caching mail in a
   store that outlives the tab would undo the point of keeping tokens in `sessionStorage`.
 
+## Three ways to run it
+
+| | What you get | What it costs |
+| --- | --- | --- |
+| **Mac app** | A real `.app` in your Applications folder. Dock icon, own window, no Terminal. Stays signed in indefinitely. | Build it once on a Mac; Gatekeeper needs a right-click on first launch. |
+| **Laptop browser** | Works in a few minutes with only Node installed. | A Terminal window must stay open, and you re-sign-in about hourly. |
+| **Phone / deployed** | Installs to the iPhone home screen from any HTTPS host. | Needs somewhere to deploy; also re-signs-in hourly. |
+
+All three run the same app against the same Gmail account. Setting up one doesn't stop you
+adding another later.
+
+## Run it as a Mac app
+
+The desktop build is a [Tauri](https://tauri.app) app: the same interface, wrapped in a
+native window using macOS's own WebKit, so the whole thing is around 10 MB rather than the
+150 MB+ an Electron app would cost.
+
+It is not just the web app in a window, because it couldn't be. **Google has blocked OAuth
+inside embedded webviews since February 2023** — a sign-in page loaded in an app window is
+refused with `disallowed_useragent`, and working around it by faking the user agent breaks
+Google's terms. So the desktop build authenticates the way Google intends for installed
+apps ([RFC 8252](https://datatracker.ietf.org/doc/html/rfc8252)): it opens **your real
+browser** for consent, catches the redirect on a loopback port, and exchanges the code
+using PKCE.
+
+That detour buys something worthwhile. A desktop client gets a **refresh token**, so the
+app signs itself back in silently. The hourly re-authentication that the browser build
+cannot avoid simply doesn't happen here.
+
+### Building it
+
+On the Mac, with [Node.js](https://nodejs.org) 20+, [Rust](https://rustup.rs) and Xcode
+Command Line Tools (`xcode-select --install`):
+
+```bash
+git clone https://github.com/sparkly-quasar/inbox-sweep.git
+cd inbox-sweep
+npm install
+npm run mac:build
+```
+
+The first build compiles the Rust dependency tree and takes a few minutes; later builds are
+much faster. You'll find the app at:
+
+```
+src-tauri/target/release/bundle/macos/Inbox Sweep.app
+```
+
+Drag it to **Applications**. To iterate on the code instead, `npm run mac:dev` runs it with
+hot reload.
+
+**No Mac to build on?** The repo's `macOS .app` CI job builds the bundle for you: open the
+repo's **Actions** tab → **ci** → **Run workflow**, and download the `inbox-sweep-macos`
+artifact when it finishes. It's a manual trigger because macOS runner minutes are billed at
+ten times the Linux rate.
+
+### First launch
+
+macOS will refuse to open it: *"Inbox Sweep can't be opened because Apple cannot check it
+for malicious software."* That's Gatekeeper reacting to an unsigned app, not a problem with
+the build. **Right-click the app → Open → Open**, once. After that it launches normally.
+
+If you downloaded it from CI rather than building locally, clear the quarantine flag first:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Inbox Sweep.app"
+```
+
+Signing it properly so it just opens requires an Apple Developer account ($99/year) for
+notarisation. Not worth it for a personal tool.
+
+### Its OAuth client is a different one
+
+The Mac app needs a **Desktop app** client, not the Web application client the browser build
+uses — different type, and it comes with a client secret that the token exchange requires.
+Everything else in the [setup walkthrough](#getting-a-google-oauth-client-id) is the same:
+same project, same Gmail API, same scopes, same Test users entry. At step 4 choose
+**Desktop app** instead of Web application, skip the authorised-origins field entirely, and
+paste both the ID and the secret into the app.
+
+Google still shows the unverified-app warning. Same reason, same answer: **Advanced → Go to
+… (unsafe)**.
+
+### Where it keeps things
+
+Credentials live in `~/Library/Application Support/io.github.sparkly-quasar.inbox-sweep/credentials.json`,
+written `0600` so only your account can read it.
+
+This is a deliberate trade-off worth stating plainly: the browser build keeps its token in
+`sessionStorage`, where it dies with the tab and never touches disk. A refresh token has to
+outlive the process — that is the entire point of it — so the desktop app stores one. The
+file permissions are the same protection `gcloud` and `npm` rely on. The macOS Keychain
+would be stronger; if you'd rather have that, it's a contained change to `src-tauri/src/store.rs`.
+
+**Sign out** deletes the refresh token but keeps your client credentials, so signing back in
+is one click. **Change OAuth client** erases everything.
+
 ## Run it on your laptop
 
-This is the easiest way to use the app, and the best way to try it before bothering with
-hosting. No deployment, no HTTPS certificate, no phone involved. It runs in your normal
-desktop browser and the layout adapts to the wider window.
+This is the easiest way to *try* the app — no deployment, no HTTPS certificate, no Rust
+toolchain. It runs in your normal desktop browser and the layout adapts to the wider window.
 
 You need [Node.js](https://nodejs.org) 20 or newer (`node --version` to check).
 
@@ -178,27 +274,60 @@ Add that address as an origin too — note it changes each time you restart the 
 npm install
 npm start            # or: npm run dev — http://localhost:5173
 npm test             # unit tests (vitest)
-npm run test:e2e     # end-to-end tests (playwright, iPhone viewport, stubbed Gmail)
+npm run test:e2e     # end-to-end tests (playwright, stubbed Gmail)
 npm run lint
 npm run build
-npm run icons        # regenerate PNG icons from public/icons/icon.svg
+npm run icons        # regenerate PWA icons from public/icons/icon.svg
+
+npm run mac:dev      # run the Mac app with hot reload   (needs Rust)
+npm run mac:build    # produce the .app bundle           (needs Rust + macOS)
+npm run mac:test     # Rust unit tests                   (needs Rust)
+```
+
+### Layout
+
+```
+src/            React app — shared by every build
+  lib/gmail.ts    Gmail REST client: batching, quota pacing, retries
+  lib/scan.ts     scan orchestration and incremental caching
+  lib/auth.ts     browser OAuth (Google Identity Services, implicit)
+  lib/desktop.ts  bridge to the Tauri commands; inert in the browser
+src-tauri/      Rust — desktop build only
+  src/oauth.rs    native-app OAuth: loopback listener, PKCE, token exchange
+  src/store.rs    credential persistence
+  src/lib.rs      the Tauri commands the frontend calls
 ```
 
 ### Tests
 
-70 unit tests cover the pure logic — header parsing (quoted names, unbracketed addresses,
-`List-Unsubscribe` shapes), sender grouping and display-name selection, sorting, the
-multipart batch-response parser including partial failures, and filter construction.
+**70 unit tests** (vitest) cover the pure TypeScript — header parsing (quoted names,
+unbracketed addresses, `List-Unsubscribe` shapes), sender grouping and display-name
+selection, sorting, the multipart batch-response parser including partial failures, and
+filter construction.
 
-23 end-to-end tests drive the real UI at iPhone viewport against a stubbed Gmail API,
-covering the scan, grouping and sorting, every bulk action and its confirmation, unsubscribe,
-filter creation, the IndexedDB cache, expired-session handling, the batch→individual
-fallback, plus iPhone-specific checks (no horizontal scroll, 44px tap targets, 16px inputs
-so Safari doesn't zoom, and an installable manifest whose icons all resolve).
+**16 Rust unit tests** (`cargo test`) cover the desktop OAuth logic — percent
+encode/decode round-trips and malformed input, HTTP request-line and query parsing, the
+consent URL carrying everything Google needs, the PKCE challenge against the RFC 7636 test
+vector, and credential storage including corrupt files and file permissions.
 
-The e2e suite runs on **Chromium with iPhone 13 metrics**, not WebKit — WebKit isn't
-installed in this environment. It verifies layout, tap targets and app logic, none of which
-are engine-specific. Real Safari behaviour is worth a check on the device itself.
+**36 end-to-end tests** (playwright) drive the real UI against a stubbed Gmail API:
+
+- the scan, grouping and sorting, every bulk action and its confirmation, unsubscribe,
+  filter creation, the IndexedDB cache, expired sessions, and the batch→individual fallback
+- iPhone-specific checks: no horizontal scroll, 44px tap targets, 16px inputs so Safari
+  doesn't zoom, and an installable manifest whose icons all resolve
+- the desktop flow, by replacing `window.__TAURI_INTERNALS__` with a fake backend so the
+  real `src/lib/desktop.ts` runs: setup asking for a secret, silent sign-in from a stored
+  refresh token, recovery from a revoked one, sign-out, and forgetting the client
+
+Two gaps worth naming, both needing hardware this was not built on:
+
+- The e2e suite runs on **Chromium with iPhone 13 metrics**, not WebKit. It verifies layout
+  and logic, which aren't engine-specific, but real Safari deserves a look on the device.
+- The Rust is compiled and unit-tested **on Linux**. The **IPC wiring between the frontend
+  and the Rust commands, the `.app` bundling, and the live Google round-trip have not been
+  executed** — they need a Mac. Everything either side of that boundary is tested; the
+  boundary itself isn't.
 
 ## Known limits
 
@@ -207,7 +336,9 @@ are engine-specific. Real Safari behaviour is worth a check on the device itself
   *succeeded*. Rescan in a few days to see whether it took.
 - **Filters are not retroactive.** Gmail applies them only to mail that arrives after
   creation. Use Trash or Archive for what's already there — the sheet says so.
-- **Sessions expire hourly.** A consequence of having no backend; see above.
+- **Sessions expire hourly in the browser build.** A consequence of having no backend; see
+  above. The Mac app doesn't have this problem — it holds a refresh token and signs itself
+  back in silently.
 - **A first scan of a very large mailbox takes minutes** and is quota-bound at roughly 50
   messages/second. It is cached afterwards, and it is resumable — partial progress is banked
   as it goes, so stopping and restarting doesn't start over.

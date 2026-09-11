@@ -12,6 +12,8 @@ import {
   type FilterPlan,
 } from './lib/actions';
 import { clearAccount } from './lib/cache';
+import * as desktopAuth from './lib/desktop';
+import { isDesktop, type DesktopStatus } from './lib/desktop';
 import { SenderRow } from './components/SenderRow';
 import { SenderSheet } from './components/SenderSheet';
 import { SetupScreen } from './components/SetupScreen';
@@ -37,6 +39,11 @@ const SORTS: { id: SortBy; label: string }[] = [
 ];
 
 export default function App() {
+  // Which build we're running in. Fixed for the lifetime of the process, so
+  // it's resolved once rather than re-checked on every render.
+  const [desktop] = useState(() => isDesktop());
+  const [desktopStatus, setDesktopStatus] = useState<DesktopStatus | null>(null);
+
   const [clientId, setClientId] = useState<string>(
     () => BUILD_TIME_CLIENT_ID || localStorage.getItem(CLIENT_ID_KEY) || '',
   );
@@ -58,9 +65,42 @@ export default function App() {
 
   /* ---------- auth ---------- */
 
-  // Try a silent sign-in on load so a returning user lands straight in the app.
+  // Desktop: ask Rust what it has stored, then use the refresh token to get
+  // straight into the app. This is the payoff of the native flow — a returning
+  // user never sees a sign-in screen until they revoke access.
   useEffect(() => {
-    if (!clientId || session) return;
+    if (!desktop || session) return;
+    let cancelled = false;
+
+    desktopAuth
+      .status()
+      .then(async (status) => {
+        if (cancelled) return;
+        setDesktopStatus(status);
+        if (!status.signedIn) return;
+
+        try {
+          const refreshed = await desktopAuth.refreshSession();
+          if (!cancelled) setSession(refreshed);
+        } catch {
+          // A revoked refresh token is dropped by Rust; fall back to the
+          // sign-in screen rather than surfacing an error the user can't act on.
+          if (!cancelled) setDesktopStatus({ ...status, signedIn: false });
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) setError(explain(err));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [desktop, session]);
+
+  // Browser: try a silent sign-in on load so a returning user lands straight
+  // in the app.
+  useEffect(() => {
+    if (desktop || !clientId || session) return;
     let cancelled = false;
     ensureToken(clientId)
       .then((s) => {
@@ -72,7 +112,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [clientId, session]);
+  }, [desktop, clientId, session]);
 
   // Resolve which mailbox we're looking at; the cache is keyed on it.
   useEffect(() => {
@@ -94,15 +134,24 @@ export default function App() {
   const signIn = async () => {
     setError(null);
     try {
-      setSession(await requestToken(clientId, true));
+      // Desktop sign-in hands off to the user's real browser and resolves when
+      // they come back, so it can sit pending for a while.
+      setSession(desktop ? await desktopAuth.signIn() : await requestToken(clientId, true));
     } catch (err) {
       setError(explain(err));
     }
   };
 
   const signOut = () => {
-    if (session) revoke(session.token);
-    clearSession();
+    if (desktop) {
+      void desktopAuth.signOut().catch(() => {
+        /* the in-memory session is cleared regardless */
+      });
+      setDesktopStatus((s) => (s ? { ...s, signedIn: false } : s));
+    } else {
+      if (session) revoke(session.token);
+      clearSession();
+    }
     setSession(null);
     setMessages([]);
     setAccount('');
@@ -226,16 +275,41 @@ export default function App() {
 
   /* ---------- render ---------- */
 
-  if (!clientId) {
+  // Desktop waits for Rust to report what it has stored before choosing a
+  // screen, so the user never sees setup flash before their saved session.
+  if (desktop && !session && !desktopStatus) {
+    return (
+      <Shell>
+        <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <span className="spinner" />
+          <span>Starting…</span>
+        </div>
+      </Shell>
+    );
+  }
+
+  const needsSetup = desktop ? !desktopStatus?.configured : !clientId;
+
+  if (needsSetup) {
     return (
       <Shell>
         <SetupScreen
+          mode={desktop ? 'desktop' : 'browser'}
           origin={window.location.origin}
           error={error}
-          onSave={(id) => {
-            localStorage.setItem(CLIENT_ID_KEY, id);
-            setClientId(id);
+          onSave={async (id, secret) => {
             setError(null);
+            if (desktop) {
+              try {
+                await desktopAuth.saveClient(id, secret ?? '');
+                setDesktopStatus(await desktopAuth.status());
+              } catch (err) {
+                setError(explain(err));
+              }
+            } else {
+              localStorage.setItem(CLIENT_ID_KEY, id);
+              setClientId(id);
+            }
           }}
         />
       </Shell>
@@ -248,7 +322,9 @@ export default function App() {
         <div className="card">
           <h2 style={{ marginTop: 0 }}>Sign in to Gmail</h2>
           <p className="note" style={{ marginTop: 0 }}>
-            Your mail is read on this device and sent nowhere else. There is no server.
+            {desktop
+              ? 'This opens your browser to approve access — Google requires that rather than an in-app window. Your mail is read on this device and sent nowhere else.'
+              : 'Your mail is read on this device and sent nowhere else. There is no server.'}
           </p>
           {error ? <div className="alert alert-error" style={{ marginTop: 12 }}>{error}</div> : null}
           <button className="btn btn-primary btn-block" style={{ marginTop: 14 }} onClick={signIn} data-testid="sign-in">
@@ -257,12 +333,17 @@ export default function App() {
           <button
             className="btn btn-block"
             style={{ marginTop: 8 }}
-            onClick={() => {
-              localStorage.removeItem(CLIENT_ID_KEY);
-              setClientId('');
+            onClick={async () => {
+              if (desktop) {
+                await desktopAuth.forgetAll().catch(() => undefined);
+                setDesktopStatus({ configured: false, signedIn: false });
+              } else {
+                localStorage.removeItem(CLIENT_ID_KEY);
+                setClientId('');
+              }
             }}
           >
-            Change OAuth client ID
+            Change OAuth client
           </button>
         </div>
       </Shell>

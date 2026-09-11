@@ -31,3 +31,7 @@ dist-ssr
 
 # Generated review screenshots
 /screenshots/
+
+# Tauri / Rust build output
+/src-tauri/target/
+/src-tauri/gen/

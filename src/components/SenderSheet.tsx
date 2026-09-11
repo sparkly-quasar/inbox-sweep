@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Sheet } from './Sheet';
+import { openUrl } from '../lib/desktop';
 import type { SenderGroup } from '../lib/group';
 import { formatAge, formatSize } from '../lib/parse';
 import {
@@ -69,11 +70,14 @@ export function SenderSheet({
           });
           break;
         case 'open-url':
-          window.open(outcome.url, '_blank', 'noopener,noreferrer');
-          setNotice({ tone: 'ok', text: 'Opened the unsubscribe page in a new tab — finish it there.' });
+          await openUrl(outcome.url);
+          setNotice({
+            tone: 'ok',
+            text: 'Opened the unsubscribe page in your browser — finish it there.',
+          });
           break;
         case 'mailto':
-          window.location.href = outcome.url;
+          await openUrl(outcome.url);
           break;
         case 'unavailable':
           setNotice({ tone: 'error', text: 'This sender did not include an unsubscribe link.' });
