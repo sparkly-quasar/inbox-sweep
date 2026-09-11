@@ -48,57 +48,135 @@ A few other decisions worth knowing:
 - **The service worker caches the app shell only** — never API responses. Caching mail in a
   store that outlives the tab would undo the point of keeping tokens in `sessionStorage`.
 
-## Setup
+## Run it on your laptop
 
-You need your own Google OAuth client. This is unavoidable: Gmail's read/modify scopes are
-"restricted", and an app cannot ship a shared client ID for them without going through
-Google's verification and a security assessment. Your own client, used only by you, needs
-none of that — but it does cap you at 100 test users, which is fine for personal use.
+This is the easiest way to use the app, and the best way to try it before bothering with
+hosting. No deployment, no HTTPS certificate, no phone involved. It runs in your normal
+desktop browser and the layout adapts to the wider window.
 
-It takes about three minutes, once:
-
-1. At [console.cloud.google.com](https://console.cloud.google.com), create a project.
-2. **APIs & Services → Library** → enable the **Gmail API**.
-3. **OAuth consent screen** → **External**. Fill in an app name and your email. Add your own
-   Google account under **Test users**.
-4. Add these scopes:
-   - `https://www.googleapis.com/auth/gmail.modify` — read headers, apply labels, trash
-   - `https://www.googleapis.com/auth/gmail.settings.basic` — create filters
-5. **Credentials** → **Create credentials** → **OAuth client ID** → **Web application**.
-   Under **Authorised JavaScript origins**, add the exact URL you'll serve the app from
-   (e.g. `https://inbox-sweep.you.vercel.app`). No trailing slash.
-6. Open the app and paste the client ID into the setup screen.
-
-The client ID is not a secret — browser OAuth clients are public by design. You can also
-bake it in at build time with `VITE_GOOGLE_CLIENT_ID` instead of pasting it.
-
-> Google will show an "unverified app" warning on first sign-in. That is expected for a
-> personal OAuth client with you as the sole test user.
-
-## Deploying, and installing on the iPhone
-
-The build output is static, so any static host works. It **must** be served over HTTPS —
-both Google OAuth and service workers require it. `localhost` is exempt for development.
+You need [Node.js](https://nodejs.org) 20 or newer (`node --version` to check).
 
 ```bash
+git clone https://github.com/sparkly-quasar/inbox-sweep.git
+cd inbox-sweep
 npm install
+npm start
+```
+
+Open **http://localhost:5173**. The app will ask for a Google OAuth client ID — that's the
+one genuinely fiddly part, and the next section walks through it. Stop the server with
+`Ctrl-C`; run `npm start` again whenever you want it back.
+
+Nothing is installed into your browser and no data leaves your machine: the page talks to
+Gmail directly, and closing the tab discards the session.
+
+## Getting a Google OAuth client ID
+
+You need your own. There is no way around this and it isn't a limitation of this app:
+Gmail's read/modify permissions are what Google calls **restricted scopes**, and any app
+that ships a shared client ID for them must pass Google's verification and a third-party
+security assessment. A client you create for yourself skips all of that.
+
+It's free, takes a few minutes, and you only ever do it once. The client ID is **not a
+secret** — browser OAuth clients are public by design, so there's no risk in pasting it
+into the app or committing it.
+
+Work through these in order at
+[console.cloud.google.com](https://console.cloud.google.com):
+
+**1. Make a project.** Click the project dropdown in the top bar → **New Project**. Name it
+anything (`inbox-sweep` is fine) → **Create**. Wait for it to finish, then make sure that
+new project is the one selected in the top bar — this trips people up, and every step below
+applies to whichever project is selected.
+
+**2. Turn on the Gmail API.** Search "Gmail API" in the top search bar, open it, and click
+**Enable**. Without this every request fails with a 403.
+
+**3. Set up the consent screen.** In the left menu find **APIs & Services → OAuth consent
+screen** (in newer consoles this is **Google Auth Platform**, and the pieces below are split
+across its *Branding*, *Audience* and *Data Access* pages):
+
+- **User type / Audience:** choose **External**. "Internal" only exists for Workspace
+  organisations and will be greyed out on a personal account.
+- **App information / Branding:** an app name and your own email address. Everything else is
+  optional — skip it.
+- **Data access / Scopes:** click **Add or remove scopes**, then paste each of these into
+  the filter box and tick it:
+  - `https://www.googleapis.com/auth/gmail.modify` — read headers, apply labels, move to trash
+  - `https://www.googleapis.com/auth/gmail.settings.basic` — create filters
+
+  Google will warn that these are sensitive/restricted. That warning is about *publishing*
+  an app to the public; it doesn't apply while you're the only user.
+- **Test users / Audience:** click **Add users** and add **your own Gmail address**. Miss
+  this and sign-in fails with `access_denied`, which is the single most common thing to get
+  wrong here.
+
+**4. Create the client.** **APIs & Services → Credentials → Create credentials → OAuth
+client ID** → application type **Web application**. Under **Authorised JavaScript origins**
+click **Add URI** and enter exactly:
+
+```
+http://localhost:5173
+```
+
+No trailing slash, no path. Plain `http` is correct here — Google requires HTTPS for every
+origin *except* localhost, which is specifically exempt. Leave **Authorised redirect URIs**
+empty; this app doesn't use one.
+
+Click **Create**. Copy the client ID that pops up — it looks like
+`948...-abc123.apps.googleusercontent.com`.
+
+**5. Paste it into the app** at http://localhost:5173 and click **Save and continue**, then
+**Sign in with Google**.
+
+> **The scary warning is expected.** Google shows "Google hasn't verified this app". Click
+> **Advanced** → **Go to … (unsafe)**. It says that because *you* created the client and
+> haven't submitted it for review — you are trusting an app you built, running on your own
+> machine.
+
+If you later deploy the app somewhere, add that new origin (e.g.
+`https://inbox-sweep.you.vercel.app`) to the same client's **Authorised JavaScript
+origins** — a client can hold several. Changes can take a few minutes to take effect.
+
+### When sign-in doesn't work
+
+| What you see | Cause |
+| --- | --- |
+| `redirect_uri_mismatch` or `origin_mismatch` | The origin in the browser's address bar isn't in **Authorised JavaScript origins**. It must match exactly — `http://localhost:5173`, not `127.0.0.1`, not a trailing slash. |
+| `access_denied` | Your Gmail address isn't in **Test users**. |
+| 403 on every request after signing in | The Gmail API isn't enabled on the selected project. |
+| Sign-in button does nothing | An ad blocker or tracking-protection setting is blocking `accounts.google.com`. |
+
+## Putting it on your iPhone
+
+For the phone you *do* need to deploy it, because Google won't accept a local-network
+address as an origin: the rule is HTTPS-only, with localhost as the sole exception, and raw
+IPs like `192.168.1.20` are rejected outright. So running `npm start` and browsing to your
+laptop's IP from the phone will not work for sign-in.
+
+Build the static output and put it on any static host — Vercel, Netlify, Cloudflare Pages,
+GitHub Pages, or your own web server:
+
+```bash
 npm run build      # → dist/
 ```
 
-Then deploy `dist/` (Vercel, Netlify, Cloudflare Pages, GitHub Pages, or your own nginx).
-Add the deployed origin to your OAuth client's authorised origins.
+Add the resulting HTTPS URL to your OAuth client's **Authorised JavaScript origins**, then
+on the phone:
 
-To install on the phone:
-
-1. Open the URL in **Safari** (not Chrome — only Safari can install to the home screen on iOS).
-2. Tap **Share** → **Add to Home Screen**.
+1. Open the URL in **Safari** — only Safari can add to the home screen on iOS.
+2. **Share** → **Add to Home Screen**.
 3. Launch it from the icon. It runs full-screen with no browser chrome.
+
+For a quick test without deploying, a tunnel such as `cloudflared tunnel --url
+http://localhost:5173` or `ngrok http 5173` gives you a temporary public HTTPS address.
+Add that address as an origin too — note it changes each time you restart the tunnel.
 
 ## Development
 
 ```bash
 npm install
-npm run dev          # http://localhost:5173, reachable from your phone on the same network
+npm start            # or: npm run dev — http://localhost:5173
 npm test             # unit tests (vitest)
 npm run test:e2e     # end-to-end tests (playwright, iPhone viewport, stubbed Gmail)
 npm run lint
