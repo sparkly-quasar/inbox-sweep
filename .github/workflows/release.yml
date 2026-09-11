@@ -75,56 +75,72 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           ls -lh dist-release
 
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.package.outputs.tag }}
-          VERSION: ${{ steps.package.outputs.version }}
+      # Uploaded before publishing so that a failure in the publish step does
+      # not throw away a ten-minute build.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: inbox-sweep-macos-universal
+          path: dist-release/
+          retention-days: 14
+
+      - name: Write release notes
+        # A plain heredoc into a file, never a heredoc inside $( ). macOS ships
+        # bash 3.2, which cannot parse the latter and fails with an unhelpful
+        # "unexpected EOF while looking for matching )".
         run: |
-          NOTES=$(cat <<'EOF'
+          cat > release-notes.md <<'NOTES'
           Bulk Gmail cleanup as a native macOS app — group your mailbox by sender, then
           trash, archive, unsubscribe or filter an entire sender in one action.
 
           ## Install
 
           Download the `.dmg`, open it, and drag **Inbox Sweep** to Applications.
-          (The `.zip` contains the same `.app` if you prefer.)
+          (The `.zip` holds the same `.app` if you prefer.)
 
-          The app is **universal** — one binary for both Apple Silicon and Intel Macs.
-          Requires macOS 10.15 or later.
+          The app is **universal** — one binary covering both Apple Silicon and Intel
+          Macs. Requires macOS 10.15 or later.
 
           ### First launch
 
-          The app is not signed with an Apple Developer certificate, so macOS will
-          refuse to open it: *"Apple cannot check it for malicious software."* Clear
-          the quarantine flag once:
+          The app is not signed with an Apple Developer certificate, so macOS will refuse
+          to open it: *"Apple cannot check it for malicious software."* Clear the
+          quarantine flag once:
 
           ```
           xattr -dr com.apple.quarantine "/Applications/Inbox Sweep.app"
           ```
 
-          then right-click the app → **Open** → **Open**. It launches normally after that.
+          then right-click the app and choose **Open**. It launches normally after that.
 
           ### Setup
 
           You need your own free Google OAuth client of type **Desktop app** — Gmail's
-          permissions are "restricted", so no app can ship a shared one. The app walks
-          you through it on first run; the README has the full steps and a
+          permissions are "restricted", so no app can ship a shared one. The app walks you
+          through it on first run, and the README has the full steps plus a
           troubleshooting table.
 
-          Signing in opens your real browser, because Google rejects OAuth inside
-          embedded app windows. The app then stays signed in — it holds a refresh
-          token, so there is no hourly re-authentication.
-          EOF
-          )
+          Signing in opens your real browser, because Google rejects OAuth inside embedded
+          app windows. The app then stays signed in: it holds a refresh token, so there is
+          no hourly re-authentication.
+          NOTES
+          echo "--- notes ---"
+          cat release-notes.md
 
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.package.outputs.tag }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist-release/* --clobber
           else
             # --target creates the tag at this commit when it doesn't exist,
-            # which is what makes a manual run able to cut a fresh release.
+            # which is what lets a manual run cut a fresh release.
             gh release create "$TAG" dist-release/* \
               --target "$GITHUB_SHA" \
               --title "Inbox Sweep $VERSION" \
-              --notes "$NOTES"
+              --notes-file release-notes.md
           fi
+          gh release view "$TAG" --json tagName,assets \
+            --jq '"published \(.tagName): \(.assets | map(.name) | join(", "))"'
