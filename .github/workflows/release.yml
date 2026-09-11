@@ -3,11 +3,12 @@ name: release
 on:
   push:
     tags: ['v*']
-  # Lets a release be rebuilt without moving the tag.
+  # Cuts a release from whatever branch is selected, creating the tag if it
+  # does not exist yet. Also re-runs a release whose build failed.
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to build and publish (e.g. v0.1.0)'
+        description: 'Tag to publish, created at the selected commit if new (e.g. v0.1.0)'
         required: true
 
 permissions:
@@ -18,9 +19,9 @@ jobs:
     name: universal macOS app
     runs-on: macos-latest
     steps:
+      # No explicit ref: a tag push checks out the tag, a manual run checks out
+      # the branch chosen in the Actions UI.
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
 
       - uses: actions/setup-node@v4
         with:
@@ -120,7 +121,10 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist-release/* --clobber
           else
+            # --target creates the tag at this commit when it doesn't exist,
+            # which is what makes a manual run able to cut a fresh release.
             gh release create "$TAG" dist-release/* \
+              --target "$GITHUB_SHA" \
               --title "Inbox Sweep $VERSION" \
               --notes "$NOTES"
           fi
