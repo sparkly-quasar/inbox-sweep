@@ -52,7 +52,7 @@ A few other decisions worth knowing:
 
 | | What you get | What it costs |
 | --- | --- | --- |
-| **Mac app** | A real `.app` in your Applications folder. Dock icon, own window, no Terminal. Stays signed in indefinitely. | Build it once on a Mac; Gatekeeper needs a right-click on first launch. |
+| **Mac app** | A real `.app` in your Applications folder. Dock icon, own window, no Terminal. Stays signed in indefinitely. | [Download the `.dmg`](https://github.com/sparkly-quasar/inbox-sweep/releases); Gatekeeper needs one right-click on first launch. |
 | **Laptop browser** | Works in a few minutes with only Node installed. | A Terminal window must stay open, and you re-sign-in about hourly. |
 | **Phone / deployed** | Installs to the iPhone home screen from any HTTPS host. | Needs somewhere to deploy; also re-signs-in hourly. |
 
@@ -77,7 +77,28 @@ That detour buys something worthwhile. A desktop client gets a **refresh token**
 app signs itself back in silently. The hourly re-authentication that the browser build
 cannot avoid simply doesn't happen here.
 
-### Building it
+### Download it
+
+Grab the latest `.dmg` from
+[**Releases**](https://github.com/sparkly-quasar/inbox-sweep/releases), open it, and drag
+**Inbox Sweep** to Applications. The build is **universal** — one binary covering both
+Apple Silicon and Intel Macs — and needs macOS 10.15 or later. Nothing to install, no
+toolchain, no Terminal.
+
+On first launch macOS will refuse to open it: *"Apple cannot check it for malicious
+software."* That's Gatekeeper reacting to an app signed by nobody, not a problem with the
+build. Clear the quarantine flag once:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Inbox Sweep.app"
+```
+
+then right-click the app → **Open** → **Open**. It launches normally from then on.
+
+Making it open cleanly on the first double-click requires notarisation, which needs an
+Apple Developer account at $99/year — hard to justify for a personal tool.
+
+### Building it yourself
 
 On the Mac, with [Node.js](https://nodejs.org) 20+, [Rust](https://rustup.rs) and Xcode
 Command Line Tools (`xcode-select --install`):
@@ -99,25 +120,28 @@ src-tauri/target/release/bundle/macos/Inbox Sweep.app
 Drag it to **Applications**. To iterate on the code instead, `npm run mac:dev` runs it with
 hot reload.
 
-**No Mac to build on?** The repo's `macOS .app` CI job builds the bundle for you: open the
-repo's **Actions** tab → **ci** → **Run workflow**, and download the `inbox-sweep-macos`
-artifact when it finishes. It's a manual trigger because macOS runner minutes are billed at
-ten times the Linux rate.
-
-### First launch
-
-macOS will refuse to open it: *"Inbox Sweep can't be opened because Apple cannot check it
-for malicious software."* That's Gatekeeper reacting to an unsigned app, not a problem with
-the build. **Right-click the app → Open → Open**, once. After that it launches normally.
-
-If you downloaded it from CI rather than building locally, clear the quarantine flag first:
+A local build targets **your own Mac's architecture only**. The universal binary in
+Releases comes from `--target universal-apple-darwin`, which needs both Rust targets
+installed:
 
 ```bash
-xattr -dr com.apple.quarantine "/Applications/Inbox Sweep.app"
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
+npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
 ```
 
-Signing it properly so it just opens requires an Apple Developer account ($99/year) for
-notarisation. Not worth it for a personal tool.
+### Cutting a release
+
+Tag and push; the `release` workflow builds the universal bundle on a macOS runner,
+verifies with `lipo` that both architectures really made it in, and publishes the `.dmg`
+and `.zip` to the release:
+
+```bash
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The arch check is there because a build that silently came out single-architecture installs
+perfectly on the machine that made it and fails on half the Macs that download it. Better
+to fail the release.
 
 ### Its OAuth client is a different one
 

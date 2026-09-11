@@ -77,10 +77,11 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml
 
   macos-bundle:
-    name: macOS .app
-    # Only on demand: this is the one job that proves the bundle actually
-    # builds, but it burns the scarcest runner minutes, so it is not run on
-    # every push.
+    name: macOS .app (smoke build, host arch only)
+    # Proves the bundle still builds, without tagging a release. Deliberately
+    # NOT universal — that is the release workflow's job, and it costs twice
+    # the compile time. Run on demand only; macOS minutes bill at ten times
+    # the Linux rate.
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-latest
     steps:
@@ -103,6 +104,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: inbox-sweep-macos
+          # Named to make it obvious this is not the shippable universal build.
+          name: inbox-sweep-macos-smoke-build-not-universal
           path: src-tauri/target/release/bundle/macos/
           retention-days: 7
