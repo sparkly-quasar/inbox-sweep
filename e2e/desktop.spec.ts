@@ -180,3 +180,71 @@ test('changing the OAuth client forgets everything', async ({ page }) => {
   await expect(page.getByTestId('client-id-input')).toBeVisible();
   expect(await commandsCalled(page)).toContain('forget_all');
 });
+
+test('a 403 does not become an infinite re-authentication loop', async ({ page }) => {
+  // The bug this covers: the app treated 403 as "token problem", cleared the
+  // session, and the desktop build silently refreshed from its stored refresh
+  // token — producing a fresh token that Google refused identically, forever.
+  await stubTauri(page, { configured: true, signedIn: true });
+
+  let listCalls = 0;
+  await page.route('**/gmail/v1/users/me/profile*', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ emailAddress: 'tester@example.com', messagesTotal: 1, threadsTotal: 1 }),
+    }),
+  );
+  await page.route('**/gmail/v1/users/me/messages?*', (route) => {
+    listCalls++;
+    return route.fulfill({
+      status: 403,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: {
+          code: 403,
+          message: 'Gmail API has not been used in project 123 before or it is disabled.',
+          errors: [{ reason: 'accessNotConfigured', domain: 'usageLimits', message: 'Access Not Configured.' }],
+          status: 'PERMISSION_DENIED',
+        },
+      }),
+    });
+  });
+
+  await page.goto('/');
+
+  // The message must name the actual fix rather than a generic refusal.
+  await expect(page.getByText(/Gmail API is not enabled/i)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText(/Signing in again will not help/i)).toBeVisible();
+
+  const afterFirst = listCalls;
+  await page.waitForTimeout(3000);
+
+  // A loop would keep re-signing-in and re-listing; a handled error stops.
+  expect(listCalls).toBeLessThanOrEqual(afterFirst + 1);
+  expect(listCalls).toBeLessThan(5);
+
+  const signIns = (await commandsCalled(page)).filter((c) => c === 'sign_in' || c === 'refresh_session');
+  expect(signIns.length).toBeLessThan(4);
+});
+
+test('insufficient scopes tells the user to re-grant permissions', async ({ page }) => {
+  await stubTauri(page, { configured: true, signedIn: true });
+  await page.route('**/gmail/v1/users/me/profile*', (route) =>
+    route.fulfill({
+      status: 403,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        error: {
+          code: 403,
+          message: 'Request had insufficient authentication scopes.',
+          errors: [{ reason: 'insufficientPermissions', domain: 'global', message: 'Insufficient Permission' }],
+          status: 'PERMISSION_DENIED',
+        },
+      }),
+    }),
+  );
+
+  await page.goto('/');
+  await expect(page.getByText(/did not grant the permissions/i)).toBeVisible({ timeout: 15_000 });
+});

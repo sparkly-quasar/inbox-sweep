@@ -61,6 +61,8 @@ export default function App() {
   const [query, setQuery] = useState('');
 
   const abort = useRef<AbortController | null>(null);
+  // Guards against an automatic re-authentication cycling forever.
+  const reauthed = useRef(false);
   const client = useMemo(() => (session ? new GmailClient(session.token) : null), [session]);
 
   /* ---------- auth ---------- */
@@ -193,7 +195,16 @@ export default function App() {
         if (abort.current !== controller) return;
         setError(explain(err));
         setProgress((p) => (p ? { ...p, phase: 'error' } : null));
-        if (err instanceof GmailError && err.isAuthError) {
+
+        // Only an expired token is worth re-authenticating for, and only once.
+        //
+        // A 403 must never land here: signing in again produces a fresh token
+        // that is refused in exactly the same way, and on desktop — where the
+        // refresh token makes re-auth silent — that becomes an invisible
+        // infinite loop. The reauth guard covers the same risk for a 401 that
+        // somehow survives a refresh.
+        if (err instanceof GmailError && err.isExpired && !reauthed.current) {
+          reauthed.current = true;
           clearSession();
           setSession(null);
         }
@@ -526,15 +537,41 @@ function Shell({
   );
 }
 
-/** Turn an exception into something worth showing a human. */
+/**
+ * Turn an exception into something worth showing a human.
+ *
+ * A 403 has two quite different causes that the generic wording used to
+ * conflate, leaving the user to guess. Google labels them, so say which.
+ */
 function explain(err: unknown): string {
-  if (err instanceof GmailError) {
-    if (err.status === 401) return 'Your Google session expired. Sign in again.';
-    if (err.status === 403) {
-      return 'Google refused the request. Check that the Gmail API is enabled and that you granted every requested permission.';
-    }
-    if (err.status === 429) return 'Gmail is rate-limiting this account. Wait a minute and retry.';
-    return err.message;
+  if (!(err instanceof GmailError)) {
+    return err instanceof Error ? err.message : String(err);
   }
-  return err instanceof Error ? err.message : String(err);
+
+  if (err.isExpired) return 'Your Google session expired. Sign in again.';
+
+  if (err.isForbidden) {
+    switch (err.reason) {
+      case 'accessNotConfigured':
+        return (
+          'The Gmail API is not enabled on your Google Cloud project. Open the project in ' +
+          'console.cloud.google.com, search for "Gmail API", and click Enable — then retry. ' +
+          'Signing in again will not help.'
+        );
+      case 'insufficientPermissions':
+      case 'ACCESS_TOKEN_SCOPE_INSUFFICIENT':
+        return (
+          'Your sign-in did not grant the permissions this app needs. Sign out, then sign in ' +
+          'again and leave every permission checkbox ticked on the Google consent screen. ' +
+          'If it still fails, add the gmail.modify and gmail.settings.basic scopes to your ' +
+          'OAuth consent screen.'
+        );
+      default:
+        // Google's own message is usually specific and often carries a link.
+        return `Google refused the request: ${err.message.replace(/^Gmail API \d+: /, '')}`;
+    }
+  }
+
+  if (err.status === 429) return 'Gmail is rate-limiting this account. Wait a minute and retry.';
+  return err.message;
 }

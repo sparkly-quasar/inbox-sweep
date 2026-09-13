@@ -44,10 +44,45 @@ export class GmailError extends Error {
     this.body = body;
   }
 
-  /** True when re-authenticating is the fix. */
-  get isAuthError(): boolean {
-    return this.status === 401 || this.status === 403;
+  /**
+   * The token is expired or invalid. Signing in again genuinely fixes this.
+   */
+  get isExpired(): boolean {
+    return this.status === 401;
   }
+
+  /**
+   * Google understood who we are and said no.
+   *
+   * Kept strictly separate from {@link isExpired}, because the two demand
+   * opposite responses. Re-authenticating cannot fix a disabled API or a scope
+   * that was never granted — retrying just produces the same 403 with a fresh
+   * token, which is an infinite loop rather than a recovery.
+   */
+  get isForbidden(): boolean {
+    return this.status === 403;
+  }
+
+  /** Neither retrying nor continuing the current operation will help. */
+  get isFatal(): boolean {
+    return this.isExpired || this.isForbidden;
+  }
+
+  /**
+   * Google's machine-readable reason, e.g. `accessNotConfigured` when the API
+   * is not enabled or `insufficientPermissions` when the token lacks a scope.
+   * These need completely different fixes, so the UI distinguishes them.
+   */
+  get reason(): string | null {
+    const error = (this.body as { error?: GoogleErrorBody } | undefined)?.error;
+    return error?.errors?.[0]?.reason ?? error?.status ?? null;
+  }
+}
+
+interface GoogleErrorBody {
+  message?: string;
+  status?: string;
+  errors?: { reason?: string; message?: string; domain?: string }[];
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -190,7 +225,7 @@ export class GmailClient {
           messages = await this.batchGetMetadata(chunk);
         } catch (err) {
           // One failure is enough to distrust the batch endpoint for this run.
-          if (err instanceof GmailError && err.isAuthError) throw err;
+          if (err instanceof GmailError && err.isFatal) throw err;
           console.warn('Batch request failed, falling back to individual gets', err);
           useBatch = false;
           messages = await this.parallelGetMetadata(chunk, signal);
@@ -254,7 +289,7 @@ export class GmailClient {
             );
           } catch (err) {
             // A single unreadable message shouldn't sink the whole scan.
-            if (err instanceof GmailError && err.isAuthError) throw err;
+            if (err instanceof GmailError && err.isFatal) throw err;
             console.warn(`Skipping message ${id}`, err);
             return null;
           }

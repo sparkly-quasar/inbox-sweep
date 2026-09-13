@@ -80,10 +80,59 @@ describe('parseBatchResponse', () => {
 });
 
 describe('GmailError', () => {
-  it('classifies auth failures', () => {
-    expect(new GmailError('x', 401).isAuthError).toBe(true);
-    expect(new GmailError('x', 403).isAuthError).toBe(true);
-    expect(new GmailError('x', 429).isAuthError).toBe(false);
+  it('separates an expired token from a refusal', () => {
+    // These must never be conflated: re-authenticating fixes a 401 and can
+    // only loop on a 403.
+    expect(new GmailError('x', 401).isExpired).toBe(true);
+    expect(new GmailError('x', 401).isForbidden).toBe(false);
+
+    expect(new GmailError('x', 403).isForbidden).toBe(true);
+    expect(new GmailError('x', 403).isExpired).toBe(false);
+
+    expect(new GmailError('x', 429).isExpired).toBe(false);
+    expect(new GmailError('x', 429).isForbidden).toBe(false);
+  });
+
+  it('treats both as fatal to the operation in flight', () => {
+    expect(new GmailError('x', 401).isFatal).toBe(true);
+    expect(new GmailError('x', 403).isFatal).toBe(true);
+    expect(new GmailError('x', 500).isFatal).toBe(false);
+  });
+
+  it('extracts the reason when the Gmail API is not enabled', () => {
+    const err = new GmailError('Gmail API 403: ...', 403, {
+      error: {
+        code: 403,
+        message: 'Gmail API has not been used in project 123 before or it is disabled.',
+        errors: [
+          { message: 'Access Not Configured.', domain: 'usageLimits', reason: 'accessNotConfigured' },
+        ],
+        status: 'PERMISSION_DENIED',
+      },
+    });
+    expect(err.reason).toBe('accessNotConfigured');
+  });
+
+  it('extracts the reason when the token lacks a scope', () => {
+    const err = new GmailError('Gmail API 403: ...', 403, {
+      error: {
+        code: 403,
+        message: 'Request had insufficient authentication scopes.',
+        errors: [
+          { message: 'Insufficient Permission', domain: 'global', reason: 'insufficientPermissions' },
+        ],
+        status: 'PERMISSION_DENIED',
+      },
+    });
+    expect(err.reason).toBe('insufficientPermissions');
+  });
+
+  it('falls back to the status field, then to null', () => {
+    expect(new GmailError('x', 403, { error: { status: 'PERMISSION_DENIED' } }).reason).toBe(
+      'PERMISSION_DENIED',
+    );
+    expect(new GmailError('x', 403).reason).toBeNull();
+    expect(new GmailError('x', 403, 'not json').reason).toBeNull();
   });
 });
 
