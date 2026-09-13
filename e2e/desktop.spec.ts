@@ -65,6 +65,8 @@ async function stubTauri(page: Page, initial: BackendState = {}) {
             configured = false;
             signedIn = false;
             return Promise.resolve();
+          case 'open_external':
+            return Promise.resolve();
           default:
             return Promise.reject(new Error(`unexpected command: ${cmd}`));
         }
@@ -247,4 +249,26 @@ test('insufficient scopes tells the user to re-grant permissions', async ({ page
 
   await page.goto('/');
   await expect(page.getByText(/did not grant the permissions/i)).toBeVisible({ timeout: 15_000 });
+});
+
+test('shows the running version and opens Releases through Rust', async ({ page }) => {
+  // There is no auto-updater (the repo is private, so release assets need
+  // credentials the app must not carry). Showing the version and linking out
+  // is the substitute, so it needs to actually work.
+  await stubTauri(page, { configured: true, signedIn: true });
+  await stubGmailApi(page);
+  await page.goto('/');
+
+  const version = page.getByTestId('app-version');
+  await expect(version).toContainText(/^Inbox Sweep v\d+\.\d+\.\d+/);
+  await expect(version).toContainText('desktop');
+
+  await page.getByTestId('check-updates').click();
+
+  const calls = await page.evaluate(
+    () => (window as unknown as { __tauriCalls: { cmd: string; args: { url?: string } }[] }).__tauriCalls,
+  );
+  const opened = calls.find((c) => c.cmd === 'open_external');
+  expect(opened, 'the link must go through Rust, since window.open is inert in a webview').toBeTruthy();
+  expect(opened!.args.url).toContain('/releases');
 });

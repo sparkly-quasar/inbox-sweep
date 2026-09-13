@@ -107,6 +107,24 @@ then right-click the app → **Open** → **Open**. It launches normally from th
 Making it open cleanly on the first double-click requires notarisation, which needs an
 Apple Developer account at $99/year — hard to justify for a personal tool.
 
+### Updating
+
+**There is no auto-updater, by design.** Tauri's updater requires signed artifacts served
+from a URL the app can fetch *without credentials*, and this repository is private — its
+release assets need authentication, so wiring up auto-update would mean shipping a GitHub
+token inside the app. That is a worse trade than updating by hand occasionally.
+
+Instead the app shows the running version at the bottom of the window, with a **Releases**
+link beside it. Compare it against the
+[latest release](https://github.com/sparkly-quasar/inbox-sweep/releases); if you're behind,
+download the newer `.dmg` and drag it over the old app. Your credentials and sign-in
+survive, because they live in the application-data directory rather than inside the bundle.
+
+If you later make the repository public, real auto-update becomes straightforward: add
+`tauri-plugin-updater`, generate a signing keypair with `npm run tauri signer generate`,
+put the public key in `tauri.conf.json`, and hold the private key as a GitHub secret for
+the release workflow to sign with.
+
 ### Building it yourself
 
 On the Mac, with [Node.js](https://nodejs.org) 20+, [Rust](https://rustup.rs) and Xcode

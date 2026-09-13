@@ -17,6 +17,7 @@ import { isDesktop, type DesktopStatus } from './lib/desktop';
 import { SenderRow } from './components/SenderRow';
 import { SenderSheet } from './components/SenderSheet';
 import { SetupScreen } from './components/SetupScreen';
+import { VersionFooter } from './components/VersionFooter';
 
 const CLIENT_ID_KEY = 'inbox-sweep.clientId';
 const BUILD_TIME_CLIENT_ID = (import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined) ?? '';
@@ -532,7 +533,10 @@ function Shell({
           ) : null}
         </div>
       </header>
-      <main className="content">{children}</main>
+      <main className="content">
+        {children}
+        <VersionFooter />
+      </main>
     </div>
   );
 }
