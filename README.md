@@ -52,7 +52,7 @@ A few other decisions worth knowing:
 
 | | What you get | What it costs |
 | --- | --- | --- |
-| **Mac app** | A real `.app` in your Applications folder. Dock icon, own window, no Terminal. Stays signed in indefinitely. | [Download the `.dmg`](https://github.com/sparkly-quasar/inbox-sweep/releases); Gatekeeper needs one right-click on first launch. |
+| **Mac app** | A real `.app` in your Applications folder. Dock icon, own window, no Terminal. Sign-in lasts ~7 days, not one hour. | [Download the `.dmg`](https://github.com/sparkly-quasar/inbox-sweep/releases); Gatekeeper needs one right-click on first launch. |
 | **Laptop browser** | Works in a few minutes with only Node installed. | A Terminal window must stay open, and you re-sign-in about hourly. |
 | **Phone / deployed** | Installs to the iPhone home screen from any HTTPS host. | Needs somewhere to deploy; also re-signs-in hourly. |
 
@@ -74,8 +74,17 @@ browser** for consent, catches the redirect on a loopback port, and exchanges th
 using PKCE.
 
 That detour buys something worthwhile. A desktop client gets a **refresh token**, so the
-app signs itself back in silently. The hourly re-authentication that the browser build
-cannot avoid simply doesn't happen here.
+app signs itself back in silently instead of prompting every hour.
+
+How long that lasts depends on a setting most guides gloss over. Google issues a refresh
+token that **expires after 7 days** to any external app whose publishing status is
+*Testing* — which is where a personal OAuth client lives, and where it should stay. So in
+practice the Mac app asks you to sign in about once a week rather than once an hour. Moving
+to *In production* would remove that limit, but with Gmail's restricted scopes it also
+demands Google's full verification and a third-party security assessment, so it isn't worth
+it for a personal tool. A refresh token also dies if you change your Google password, since
+it carries Gmail scopes. The app handles all of this the same way: it discards the dead
+token and shows the sign-in screen.
 
 ### Download it
 
@@ -260,12 +269,33 @@ origins** — a client can hold several. Changes can take a few minutes to take 
 
 ### When sign-in doesn't work
 
-| What you see | Cause |
+| What you see | Cause and fix |
 | --- | --- |
-| `redirect_uri_mismatch` or `origin_mismatch` | The origin in the browser's address bar isn't in **Authorised JavaScript origins**. It must match exactly — `http://localhost:5173`, not `127.0.0.1`, not a trailing slash. |
-| `access_denied` | Your Gmail address isn't in **Test users**. |
+| **"Access blocked: … has not completed the Google verification process"** — a red screen with no way past it | The account you're signing in with isn't in **Test users**, or the app was switched to *In production*. See below — this is the most common one. |
+| "Google hasn't verified this app" **with an Advanced link** | Expected, and not the same thing. Click **Advanced → Go to … (unsafe)**. Your own unverified client always shows this. |
+| `redirect_uri_mismatch` or `origin_mismatch` | The origin in the browser's address bar isn't in **Authorised JavaScript origins**. It must match exactly — `http://localhost:5173`, not `127.0.0.1`, not a trailing slash. Desktop-app clients don't use this field at all. |
+| `access_denied` | Same cause as the first row: missing **Test users** entry. |
 | 403 on every request after signing in | The Gmail API isn't enabled on the selected project. |
 | Sign-in button does nothing | An ad blocker or tracking-protection setting is blocking `accounts.google.com`. |
+
+### "Access blocked: has not completed the Google verification process"
+
+This one has no **Advanced** escape hatch, which is what distinguishes it from the ordinary
+unverified-app warning. It means Google is refusing outright, for one of two reasons.
+
+**Either the signing-in account isn't an approved tester.** Go to **APIs & Services → OAuth
+consent screen** (newer consoles: **Google Auth Platform → Audience**) and look at **Test
+users**. Add the *exact* Google account you are signing in with — a work account, or a
+second personal account you happen to be signed into in that browser, will be rejected even
+though the client is yours. If several Google accounts are logged in, the consent screen may
+have picked a different one than you expect; check which address it shows.
+
+**Or the app's publishing status is "In production".** With Gmail's restricted scopes, an
+unverified production app is blocked for everyone, including you. On that same page click
+**Back to testing**. Production status is only worth pursuing if you intend to distribute
+the app publicly and complete Google's verification and security assessment.
+
+After either change, sign in again — it takes effect immediately, no waiting.
 
 ## Putting it on your iPhone
 

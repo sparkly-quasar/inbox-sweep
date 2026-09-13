@@ -120,8 +120,16 @@ jobs:
           troubleshooting table.
 
           Signing in opens your real browser, because Google rejects OAuth inside embedded
-          app windows. The app then stays signed in: it holds a refresh token, so there is
-          no hourly re-authentication.
+          app windows. The app then holds a refresh token, so it signs itself back in
+          silently rather than prompting hourly. Google expires that token after 7 days for
+          apps in *Testing* status, which is where a personal client belongs — so expect to
+          sign in roughly weekly.
+
+          If you hit **"Access blocked: … has not completed the Google verification
+          process"**, add your own Google account under **Test users** on the OAuth consent
+          screen. That red screen means the account isn't an approved tester; it is not the
+          same as the ordinary "unverified app" warning, which has an **Advanced** link you
+          can click through.
           NOTES
           echo "--- notes ---"
           cat release-notes.md
