@@ -40,18 +40,52 @@ jobs:
 
       - run: npm ci
 
-      - name: Build universal .app and .dmg
+      # Checked before the build, not during it: signing failures otherwise
+      # surface ten minutes in, after both architectures have compiled.
+      - name: Verify the signing key
         env:
-          # The updater will not install an unsigned bundle, and signing
-          # cannot be disabled. A missing secret must fail loudly rather than
-          # quietly shipping a release no one can update to.
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. Add it under Settings → Secrets and variables → Actions, or auto-update will not work."
+          # Shape first, so a mispasted secret is named precisely. Nothing here
+          # prints the key itself — only its length and whether it decodes.
+          node -e '
+            const key = (process.env.TAURI_SIGNING_PRIVATE_KEY || "").trim();
+            if (!key) {
+              console.log("::error::TAURI_SIGNING_PRIVATE_KEY is not set. Add it under Settings -> Secrets and variables -> Actions.");
+              process.exit(1);
+            }
+            console.log(`key: ${key.length} characters, ${key.split("\n").length} line(s)`);
+            let head = "";
+            try { head = Buffer.from(key.slice(0, 24), "base64").toString("utf8"); } catch {}
+            if (!head.startsWith("untrusted comment")) {
+              console.log("::error::TAURI_SIGNING_PRIVATE_KEY does not look like a Tauri signing key. It is ONE long single line of base64 starting with dW50cnVzdGVkIGNvbW1lbnQ6 - paste the whole contents of the .key file and nothing else (no surrounding notes, no partial selection).");
+              process.exit(1);
+            }
+          '
+          # Then prove it actually signs, which catches a wrong password too.
+          # The key is one line of base64, so removing whitespace is lossless
+          # and neutralises anything the paste picked up.
+          TAURI_SIGNING_PRIVATE_KEY=$(printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | tr -d '[:space:]')
+          export TAURI_SIGNING_PRIVATE_KEY
+          echo "signing-key-check" > /tmp/signing-check.txt
+          if ! npm run --silent tauri signer sign /tmp/signing-check.txt > /dev/null 2>/tmp/sign-err.txt; then
+            echo "::error::The signing key was rejected: $(tr -d '\n' < /tmp/sign-err.txt | tail -c 300)"
+            echo "::error::If this says 'Wrong password', the key and TAURI_SIGNING_PRIVATE_KEY_PASSWORD do not match. A key generated without a password needs that secret to exist and be empty."
             exit 1
           fi
+          echo "signing key verified"
+
+      - name: Build universal .app and .dmg
+        env:
+          # The updater will not install an unsigned bundle, and signing
+          # cannot be disabled.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          # Same normalisation as the verification step above.
+          TAURI_SIGNING_PRIVATE_KEY=$(printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" | tr -d '[:space:]')
+          export TAURI_SIGNING_PRIVATE_KEY
           npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
 
       - name: Verify the binary really is universal
