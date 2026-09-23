@@ -1,6 +1,6 @@
 [package]
 name = "inbox-sweep"
-version = "0.2.0"
+version = "0.2.1"
 description = "Bulk Gmail cleanup"
 authors = ["sparkly-quasar"]
 edition = "2021"
@@ -28,6 +28,8 @@ tokio = { version = "1", features = ["rt", "time"] }
 sha2 = "0.10"
 base64 = "0.22"
 rand = "0.8"
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 
 [profile.release]
 # Smaller bundle; this app is not CPU-bound.

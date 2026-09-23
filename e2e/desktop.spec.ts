@@ -30,6 +30,10 @@ interface BackendState {
   signInError?: string;
   /** Address the next `sign_in` resolves to. */
   nextSignIn?: string;
+  /** Version the updater should report as available; omit for "up to date". */
+  updateAvailable?: string;
+  /** Make the update install fail, as a bad signature would. */
+  updateInstallError?: string;
 }
 
 /**
@@ -52,6 +56,17 @@ async function stubTauri(page: Page, initial: BackendState = {}) {
     });
 
     (window as unknown as { __TAURI_INTERNALS__: unknown }).__TAURI_INTERNALS__ = {
+      // The updater plugin streams download progress over a Channel, which is
+      // built on this hook. Without it the plugin throws before reaching the
+      // command, and every update test fails for the wrong reason.
+      transformCallback(callback: (value: unknown) => void) {
+        const id = Math.floor(Math.random() * 1e9);
+        (window as unknown as Record<string, unknown>)[`_${id}`] = callback;
+        return id;
+      },
+      unregisterCallback(id: number) {
+        delete (window as unknown as Record<string, unknown>)[`_${id}`];
+      },
       invoke(cmd: string, args: Record<string, unknown> = {}) {
         calls.push({ cmd, args });
         switch (cmd) {
@@ -88,6 +103,19 @@ async function stubTauri(page: Page, initial: BackendState = {}) {
             active = null;
             return Promise.resolve();
           case 'open_external':
+            return Promise.resolve();
+
+          // The updater plugin talks over the same IPC channel.
+          case 'plugin:updater|check':
+            return Promise.resolve(
+              state.updateAvailable
+                ? { available: true, version: state.updateAvailable, currentVersion: '0.0.0', rid: 1 }
+                : null,
+            );
+          case 'plugin:updater|download_and_install':
+            if (state.updateInstallError) return Promise.reject(new Error(state.updateInstallError));
+            return Promise.resolve();
+          case 'plugin:process|restart':
             return Promise.resolve();
           default:
             return Promise.reject(new Error(`unexpected command: ${cmd}`));
@@ -279,10 +307,7 @@ test('insufficient scopes tells the user to re-grant permissions', async ({ page
   await expect(page.getByText(/did not grant the permissions/i)).toBeVisible({ timeout: 15_000 });
 });
 
-test('shows the running version and opens Releases through Rust', async ({ page }) => {
-  // There is no auto-updater (the repo is private, so release assets need
-  // credentials the app must not carry). Showing the version and linking out
-  // is the substitute, so it needs to actually work.
+test('shows the running version', async ({ page }) => {
   await stubTauri(page, { configured: true, accounts: ['me@example.com'] });
   await stubGmailApi(page);
   await page.goto('/');
@@ -290,15 +315,9 @@ test('shows the running version and opens Releases through Rust', async ({ page 
   const version = page.getByTestId('app-version');
   await expect(version).toContainText(/^Inbox Sweep v\d+\.\d+\.\d+/);
   await expect(version).toContainText('desktop');
-
-  await page.getByTestId('check-updates').click();
-
-  const calls = await page.evaluate(
-    () => (window as unknown as { __tauriCalls: { cmd: string; args: { url?: string } }[] }).__tauriCalls,
-  );
-  const opened = calls.find((c) => c.cmd === 'open_external');
-  expect(opened, 'the link must go through Rust, since window.open is inert in a webview').toBeTruthy();
-  expect(opened!.args.url).toContain('/releases');
+  // The desktop build updates itself, so it offers a check rather than a link
+  // out to the releases page.
+  await expect(page.getByTestId('check-updates')).toHaveText('Check for updates');
 });
 
 /* ---------------------------------------------------------------------- */
@@ -452,4 +471,75 @@ test('select-all then clear returns to acting on the whole sender', async ({ pag
 
   await page.getByTestId('toggle-select-all').click();
   await expect(page.getByTestId('action-trash')).toContainText('all 3');
+});
+
+/* ---------------------------------------------------------------------- */
+/* Auto-update                                                             */
+/* ---------------------------------------------------------------------- */
+
+test('offers an update when a newer release exists', async ({ page }) => {
+  await stubTauri(page, {
+    configured: true,
+    accounts: ['me@example.com'],
+    updateAvailable: '9.9.9',
+  });
+  await stubGmailApi(page);
+  await page.goto('/');
+
+  const button = page.getByTestId('install-update');
+  await expect(button).toBeVisible({ timeout: 15_000 });
+  await expect(button).toContainText('9.9.9');
+});
+
+test('stays quiet when already on the latest version', async ({ page }) => {
+  await stubTauri(page, { configured: true, accounts: ['me@example.com'] });
+  await stubGmailApi(page);
+  await page.goto('/');
+
+  await page.getByTestId('sender-row').first().waitFor({ timeout: 15_000 });
+  // No banner, no nagging — just the manual re-check.
+  await expect(page.getByTestId('install-update')).toHaveCount(0);
+  await expect(page.getByTestId('check-updates')).toBeVisible();
+});
+
+test('a manual check reports being up to date', async ({ page }) => {
+  await stubTauri(page, { configured: true, accounts: ['me@example.com'] });
+  await stubGmailApi(page);
+  await page.goto('/');
+
+  await page.getByTestId('sender-row').first().waitFor({ timeout: 15_000 });
+  await page.getByTestId('check-updates').click();
+  await expect(page.getByTestId('check-updates')).toHaveText('Up to date');
+});
+
+test('installing shows progress and calls the plugin', async ({ page }) => {
+  await stubTauri(page, {
+    configured: true,
+    accounts: ['me@example.com'],
+    updateAvailable: '9.9.9',
+  });
+  await stubGmailApi(page);
+  await page.goto('/');
+
+  await page.getByTestId('install-update').click({ timeout: 15_000 });
+  await expect(page.getByTestId('update-progress')).toBeVisible();
+
+  const calls = await page.evaluate(
+    () => (window as unknown as { __tauriCalls: { cmd: string }[] }).__tauriCalls.map((c) => c.cmd),
+  );
+  expect(calls).toContain('plugin:updater|download_and_install');
+});
+
+test('a failed install surfaces the reason instead of hanging', async ({ page }) => {
+  await stubTauri(page, {
+    configured: true,
+    accounts: ['me@example.com'],
+    updateAvailable: '9.9.9',
+    updateInstallError: 'signature mismatch',
+  });
+  await stubGmailApi(page);
+  await page.goto('/');
+
+  await page.getByTestId('install-update').click({ timeout: 15_000 });
+  await expect(page.getByTestId('update-error')).toContainText('signature mismatch');
 });

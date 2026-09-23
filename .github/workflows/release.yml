@@ -41,7 +41,18 @@ jobs:
       - run: npm ci
 
       - name: Build universal .app and .dmg
-        run: npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
+        env:
+          # The updater will not install an unsigned bundle, and signing
+          # cannot be disabled. A missing secret must fail loudly rather than
+          # quietly shipping a release no one can update to.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. Add it under Settings → Secrets and variables → Actions, or auto-update will not work."
+            exit 1
+          fi
+          npm run tauri build -- --target universal-apple-darwin --bundles app,dmg
 
       - name: Verify the binary really is universal
         # A silently arch-specific build would install fine on this runner and
@@ -71,9 +82,36 @@ jobs:
           # than assuming.
           cp "$BUNDLE"/dmg/*.dmg "dist-release/Inbox-Sweep-${VERSION}-macos-universal.dmg"
 
+          # The updater consumes the .app.tar.gz, not the .dmg. Keep Tauri's
+          # own filename: the manifest points at it by URL.
+          UPDATER=$(ls "$BUNDLE"/macos/*.app.tar.gz)
+          SIGNATURE=$(cat "$UPDATER.sig")
+          cp "$UPDATER" dist-release/
+          UPDATER_NAME=$(basename "$UPDATER")
+
+          # A universal binary serves both architectures, so both entries point
+          # at the same artifact.
+          node -e '
+            const [version, name, signature] = process.argv.slice(1);
+            const url = `https://github.com/sparkly-quasar/inbox-sweep/releases/download/v${version}/${encodeURIComponent(name)}`;
+            const platform = { signature, url };
+            console.log(JSON.stringify({
+              version,
+              notes: `Inbox Sweep ${version} — see the release notes.`,
+              pub_date: new Date().toISOString(),
+              platforms: {
+                "darwin-x86_64": platform,
+                "darwin-aarch64": platform,
+                "darwin-universal": platform,
+              },
+            }, null, 2));
+          ' "$VERSION" "$UPDATER_NAME" "$SIGNATURE" > dist-release/latest.json
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           ls -lh dist-release
+          echo "--- update manifest ---"
+          cat dist-release/latest.json
 
       # Uploaded before publishing so that a failure in the publish step does
       # not throw away a ten-minute build.
@@ -118,6 +156,9 @@ jobs:
           permissions are "restricted", so no app can ship a shared one. The app walks you
           through it on first run, and the README has the full steps plus a
           troubleshooting table.
+
+          Updates install themselves from here: the app checks this release on launch and
+          offers a one-click update, verified against a signing key built into the app.
 
           Signing in opens your real browser, because Google rejects OAuth inside embedded
           app windows. The app then holds a refresh token, so it signs itself back in

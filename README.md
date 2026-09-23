@@ -109,21 +109,36 @@ Apple Developer account at $99/year — hard to justify for a personal tool.
 
 ### Updating
 
-**There is no auto-updater, by design.** Tauri's updater requires signed artifacts served
-from a URL the app can fetch *without credentials*, and this repository is private — its
-release assets need authentication, so wiring up auto-update would mean shipping a GitHub
-token inside the app. That is a worse trade than updating by hand occasionally.
+The app updates itself. On launch it checks the latest GitHub release and, if
+there is a newer one, offers a one-click **Update to vX.Y.Z** in the footer;
+there is also a manual **Check for updates**. Nothing downloads until you ask.
 
-Instead the app shows the running version at the bottom of the window, with a **Releases**
-link beside it. Compare it against the
-[latest release](https://github.com/sparkly-quasar/inbox-sweep/releases); if you're behind,
-download the newer `.dmg` and drag it over the old app. Your credentials and sign-in
-survive, because they live in the application-data directory rather than inside the bundle.
+Updates are verified before they are applied. Every release bundle is signed
+with a minisign key during the build, and the app carries the matching public
+key — Tauri refuses an update whose signature does not match, and this check
+cannot be disabled. A substituted or tampered download cannot be installed.
 
-If you later make the repository public, real auto-update becomes straightforward: add
-`tauri-plugin-updater`, generate a signing keypair with `npm run tauri signer generate`,
-put the public key in `tauri.conf.json`, and hold the private key as a GitHub secret for
-the release workflow to sign with.
+> Versions before 0.2.1 had no updater, so if you are on one of those, install
+> the latest `.dmg` by hand once. Everything after updates itself.
+
+#### Cutting a release that can be updated to
+
+The release workflow needs two repository secrets (Settings → Secrets and
+variables → Actions):
+
+| Secret | Value |
+| --- | --- |
+| `TAURI_SIGNING_PRIVATE_KEY` | Contents of the minisign private key |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Its password — empty string if the key has none |
+
+The build fails loudly when the key is missing rather than publishing a release
+nobody can update to. The matching public key lives in `src-tauri/tauri.conf.json`
+and is not secret.
+
+To rotate the key: `npm run tauri signer generate -w ~/.inbox-sweep.key`, put the
+new public key in `tauri.conf.json`, update the secret, and cut a release. Anyone
+on an older build has to install that one by hand, since their copy still trusts
+the old key.
 
 ### Building it yourself
 

@@ -219,6 +219,12 @@ fn open_external(url: String) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // The updater verifies a minisign signature against the public key in
+        // tauri.conf.json before installing anything, so a tampered release
+        // cannot be applied even if someone served one.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        // Needed to relaunch into the new version once an update is installed.
+        .plugin(tauri_plugin_process::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             app.manage(AppState { data_dir });

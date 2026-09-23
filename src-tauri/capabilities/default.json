@@ -1,7 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Permissions for the main window. The app only needs its own commands; no filesystem, shell or HTTP plugin access is granted.",
-  "windows": ["main"],
-  "permissions": ["core:default"]
+  "description": "Permissions for the main window. The app grants only its own commands plus the updater and a restart \u2014 no filesystem, shell or arbitrary HTTP access.",
+  "windows": [
+    "main"
+  ],
+  "permissions": [
+    "core:default",
+    "updater:default",
+    "process:allow-restart"
+  ]
 }
