@@ -134,12 +134,17 @@ jobs:
           # than assuming.
           cp "$BUNDLE"/dmg/*.dmg "dist-release/Inbox-Sweep-${VERSION}-macos-universal.dmg"
 
-          # The updater consumes the .app.tar.gz, not the .dmg. Keep Tauri's
-          # own filename: the manifest points at it by URL.
+          # The updater consumes the .app.tar.gz, not the .dmg.
+          #
+          # Tauri names it "Inbox Sweep.app.tar.gz", and GitHub rewrites spaces
+          # in release asset names to dots — so a manifest built from the local
+          # filename points at a URL that does not exist, and every update
+          # fails on download while the release looks perfectly healthy.
+          # Renaming to a space-free name first removes the guesswork.
           UPDATER=$(ls "$BUNDLE"/macos/*.app.tar.gz)
           SIGNATURE=$(cat "$UPDATER.sig")
-          cp "$UPDATER" dist-release/
-          UPDATER_NAME=$(basename "$UPDATER")
+          UPDATER_NAME="Inbox-Sweep-${VERSION}-macos-universal.app.tar.gz"
+          cp "$UPDATER" "dist-release/$UPDATER_NAME"
 
           # A universal binary serves both architectures, so both entries point
           # at the same artifact.
@@ -245,3 +250,26 @@ jobs:
           fi
           gh release view "$TAG" --json tagName,assets \
             --jq '"published \(.tagName): \(.assets | map(.name) | join(", "))"'
+
+          # An update is only real if the manifest and the bundle it names are
+          # both reachable without credentials. Checking after publishing is
+          # the only place this can be proven.
+          echo "--- verifying the published update manifest ---"
+          MANIFEST_URL="https://github.com/sparkly-quasar/inbox-sweep/releases/download/$TAG/latest.json"
+          curl -fsSL "$MANIFEST_URL" -o /tmp/published.json || {
+            echo "::error::latest.json is not downloadable at $MANIFEST_URL"; exit 1; }
+
+          BUNDLE_URL=$(node -e 'console.log(require("/tmp/published.json").platforms["darwin-universal"].url)')
+          echo "manifest points at: $BUNDLE_URL"
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -L "$BUNDLE_URL")
+          if [ "$CODE" != "200" ]; then
+            echo "::error::The manifest points at $BUNDLE_URL which returns HTTP $CODE. Auto-update would fail on download. GitHub rewrites spaces in asset names, so the bundle must be uploaded with a space-free filename."
+            exit 1
+          fi
+          echo "update manifest verified: bundle reachable"
+
+          # And the app's own check must see it, via the floating "latest" URL.
+          curl -fsSL "https://github.com/sparkly-quasar/inbox-sweep/releases/latest/download/latest.json" \
+            -o /tmp/floating.json || {
+            echo "::error::releases/latest/download/latest.json is not reachable"; exit 1; }
+          echo "floating latest.json resolves to version $(node -e 'console.log(require("/tmp/floating.json").version)')"

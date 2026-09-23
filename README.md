@@ -118,7 +118,7 @@ with a minisign key during the build, and the app carries the matching public
 key — Tauri refuses an update whose signature does not match, and this check
 cannot be disabled. A substituted or tampered download cannot be installed.
 
-> Versions before 0.2.1 had no updater, so if you are on one of those, install
+> Versions before 0.2.2 had no working updater, so if you are on one of those, install
 > the latest `.dmg` by hand once. Everything after updates itself.
 
 #### Cutting a release that can be updated to
