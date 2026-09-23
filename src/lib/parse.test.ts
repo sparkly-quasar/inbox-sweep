@@ -129,10 +129,11 @@ describe('toMeta', () => {
           { name: 'List-Unsubscribe-Post', value: 'List-Unsubscribe=One-Click' },
         ],
       },
-    });
+    }, 'me@example.com');
 
     expect(meta).toMatchObject({
       id: 'm1',
+      account: 'me@example.com',
       email: 'news@acme.com',
       name: 'Acme',
       domain: 'acme.com',
@@ -146,7 +147,7 @@ describe('toMeta', () => {
   });
 
   it('defaults missing fields rather than throwing', () => {
-    const meta = toMeta({ id: 'm2' });
+    const meta = toMeta({ id: 'm2' }, 'me@example.com');
     expect(meta).toMatchObject({ id: 'm2', size: 0, date: 0, unread: false, inInbox: false });
     expect(meta.unsubscribe).toBeNull();
   });

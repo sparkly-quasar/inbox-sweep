@@ -33,6 +33,22 @@ const BATCH_SIZE = 100;
 /** Concurrency for the non-batched fallback path. */
 const FALLBACK_CONCURRENCY = 20;
 
+/**
+ * Gmail's per-user budget, and what one batch spends.
+ *
+ * The quota is 250 units/second/user and `messages.get` costs 5, so a
+ * 100-message batch spends 500 units and needs at least two seconds of
+ * spacing. An earlier version slept 1200ms and therefore ran about 65% over
+ * the limit — fine on a small inbox, fatal on "All mail".
+ */
+const QUOTA_UNITS_PER_SECOND = 250;
+const UNITS_PER_MESSAGE_GET = 5;
+/** Aim a little under the ceiling; the limit is enforced server-side. */
+const QUOTA_HEADROOM = 0.9;
+
+const paceForBatch = (size: number) =>
+  Math.ceil((size * UNITS_PER_MESSAGE_GET) / (QUOTA_UNITS_PER_SECOND * QUOTA_HEADROOM)) * 1000;
+
 export class GmailError extends Error {
   readonly status: number;
   readonly body?: unknown;
@@ -63,9 +79,32 @@ export class GmailError extends Error {
     return this.status === 403;
   }
 
+  /**
+   * Gmail is throttling us and the request should be retried after a wait.
+   *
+   * Gmail reports quota exhaustion as **403 with a rate-limit reason**, not
+   * 429. Treating every 403 as a permission refusal therefore turns a
+   * temporary throttle into a dead scan, which is exactly what a large "All
+   * mail" pass runs into.
+   */
+  get isRateLimited(): boolean {
+    if (this.status === 429) return true;
+    if (this.status !== 403) return false;
+    return (
+      this.reason === 'rateLimitExceeded' ||
+      this.reason === 'userRateLimitExceeded' ||
+      /quota exceeded|rate limit/i.test(this.message)
+    );
+  }
+
+  /** A genuine permission problem, as opposed to a throttle wearing a 403. */
+  get isPermissionDenied(): boolean {
+    return this.isForbidden && !this.isRateLimited;
+  }
+
   /** Neither retrying nor continuing the current operation will help. */
   get isFatal(): boolean {
-    return this.isExpired || this.isForbidden;
+    return this.isExpired || this.isPermissionDenied;
   }
 
   /**
@@ -95,6 +134,18 @@ export interface GmailProfile {
 
 export class GmailClient {
   private token: string;
+  /**
+   * Multiplier applied to the computed pacing, raised whenever Gmail throttles
+   * us. The published quota is not the whole story — it varies with project
+   * and load — so the client slows itself down rather than assuming the
+   * arithmetic is right.
+   */
+  private slowdown = 1;
+
+  /** Called when a request was throttled, so pacing can adapt. */
+  private onThrottled = () => {
+    this.slowdown = Math.min(this.slowdown * 1.5, 8);
+  };
 
   constructor(token: string) {
     this.token = token;
@@ -136,16 +187,9 @@ export class GmailClient {
 
     if (res.ok) return res;
 
-    const retryable = res.status === 429 || res.status >= 500;
-    if (retryable && attempt < maxRetries) {
-      const retryAfter = Number(res.headers.get('Retry-After'));
-      const delay = Number.isFinite(retryAfter) && retryAfter > 0
-        ? retryAfter * 1000
-        : 2 ** attempt * 1000 + Math.random() * 500;
-      await sleep(delay);
-      return this.request(url, init, attempt + 1, maxRetries);
-    }
-
+    // The body has to be read before retryability can be judged: a quota 403
+    // and a permission 403 are the same status and only the reason separates
+    // them.
     let body: unknown;
     let detail = res.statusText;
     try {
@@ -155,7 +199,22 @@ export class GmailClient {
     } catch {
       /* non-JSON error body; statusText will do */
     }
-    throw new GmailError(`Gmail API ${res.status}: ${detail}`, res.status, body);
+
+    const error = new GmailError(`Gmail API ${res.status}: ${detail}`, res.status, body);
+    const retryable = res.status >= 500 || error.isRateLimited;
+
+    if (retryable && attempt < maxRetries) {
+      const retryAfter = Number(res.headers.get('Retry-After'));
+      const delay =
+        Number.isFinite(retryAfter) && retryAfter > 0
+          ? retryAfter * 1000
+          : 2 ** attempt * 1000 + Math.random() * 500;
+      this.onThrottled?.();
+      await sleep(delay);
+      return this.request(url, init, attempt + 1, maxRetries);
+    }
+
+    throw error;
   }
 
   private async json<T>(url: string, init?: RequestInit): Promise<T> {
@@ -237,15 +296,18 @@ export class GmailClient {
       out.push(...messages);
       onProgress?.(out.length, ids.length);
 
-      // Pace against the 250 units/sec quota: 100 gets = 500 units = ~2s.
-      if (i + BATCH_SIZE < ids.length) await sleep(useBatch ? 1200 : 400);
+      // Pace against the per-user quota, slowing further if Gmail has already
+      // pushed back during this run.
+      if (i + BATCH_SIZE < ids.length) {
+        await sleep(paceForBatch(chunk.length) * this.slowdown);
+      }
     }
 
     return out;
   }
 
   /** One multipart/mixed request carrying up to {@link BATCH_SIZE} GETs. */
-  private async batchGetMetadata(ids: string[]): Promise<RawMessage[]> {
+  private async batchGetMetadata(ids: string[], query = META_QUERY): Promise<RawMessage[]> {
     const boundary = `batch_${Math.random().toString(36).slice(2)}`;
     const body =
       ids
@@ -254,7 +316,7 @@ export class GmailClient {
             `--${boundary}\r\n` +
             'Content-Type: application/http\r\n' +
             `Content-ID: <item-${index}>\r\n\r\n` +
-            `GET /gmail/v1/users/me/messages/${encodeURIComponent(id)}?${META_QUERY}\r\n`,
+            `GET /gmail/v1/users/me/messages/${encodeURIComponent(id)}?${query}\r\n`,
         )
         .join('\r\n') + `\r\n--${boundary}--\r\n`;
 
@@ -296,6 +358,37 @@ export class GmailClient {
         }),
       );
       out.push(...results.filter((m): m is RawMessage => m !== null));
+    }
+    return out;
+  }
+
+  /**
+   * Fetch Gmail's preview line for specific messages.
+   *
+   * Deliberately separate from the scan. A snippet is a few hundred bytes, so
+   * including it in the main pass would inflate a 30 000-message mailbox by
+   * megabytes and bloat the local cache — for text the user sees only when
+   * they open a single sender. Here it is fetched for the handful of messages
+   * actually on screen.
+   *
+   * Failures are swallowed: a missing preview should grey out one row, not
+   * break the review.
+   */
+  async getSnippets(ids: string[]): Promise<Record<string, string>> {
+    const out: Record<string, string> = {};
+    if (!ids.length) return out;
+
+    const query = 'format=metadata&fields=id,snippet';
+    for (const chunk of chunked(ids, BATCH_SIZE)) {
+      try {
+        const messages = await this.batchGetMetadata(chunk, query);
+        for (const m of messages) {
+          if (m.snippet) out[m.id] = m.snippet;
+        }
+      } catch (err) {
+        if (err instanceof GmailError && err.isFatal) throw err;
+        console.warn('Could not load previews for a batch', err);
+      }
     }
     return out;
   }

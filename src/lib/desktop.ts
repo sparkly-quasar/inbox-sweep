@@ -45,17 +45,26 @@ async function invoke<T>(command: string, args?: Record<string, unknown>): Promi
 export interface DesktopStatus {
   /** A client ID and secret have been saved. */
   configured: boolean;
-  /** A refresh token is held, so sign-in can be silent. */
-  signedIn: boolean;
+  /** Every signed-in mailbox, in a stable order. */
+  accounts: string[];
+  /** The mailbox last selected; null means the combined view. */
+  active: string | null;
+}
+
+/** A token plus the mailbox it belongs to. */
+export interface AccountSession extends Session {
+  email: string;
 }
 
 interface RawSession {
+  email: string;
   accessToken: string;
   expiresIn: number;
 }
 
-function toSession(raw: RawSession): Session {
+function toSession(raw: RawSession): AccountSession {
   return {
+    email: raw.email,
     token: raw.accessToken,
     expiresAt: Date.now() + raw.expiresIn * 1000,
   };
@@ -72,21 +81,29 @@ export function saveClient(clientId: string, clientSecret: string): Promise<void
 }
 
 /**
- * Run the interactive sign-in. This opens the user's real browser — Google
- * rejects OAuth inside an embedded webview — and resolves once they finish.
+ * Run the interactive sign-in and add whichever mailbox the user picks.
+ *
+ * This opens the user's real browser — Google rejects OAuth inside an embedded
+ * webview — and resolves once they finish. Signing in with an address that is
+ * already present replaces its token rather than adding a duplicate.
  */
-export async function signIn(): Promise<Session> {
+export async function signIn(): Promise<AccountSession> {
   return toSession(await invoke<RawSession>('sign_in'));
 }
 
-/** Mint a fresh access token from the stored refresh token, silently. */
-export async function refreshSession(): Promise<Session> {
-  return toSession(await invoke<RawSession>('refresh_session'));
+/** Mint a fresh access token for one mailbox, silently. */
+export async function refreshSession(email: string): Promise<AccountSession> {
+  return toSession(await invoke<RawSession>('refresh_session', { email }));
 }
 
-/** Drop the refresh token, keeping the client credentials. */
-export function signOut(): Promise<void> {
-  return invoke('sign_out');
+/** Remember the selected mailbox, or the combined view when null. */
+export function setActive(email: string | null): Promise<void> {
+  return invoke('set_active', { email });
+}
+
+/** Forget one mailbox, keeping the others and the client credentials. */
+export function signOut(email: string): Promise<void> {
+  return invoke('sign_out', { email });
 }
 
 /** Drop everything, including the client credentials. */

@@ -14,7 +14,16 @@ function initial(group: SenderGroup): string {
   return (ch ?? '?').toUpperCase();
 }
 
-export function SenderRow({ group, onSelect }: { group: SenderGroup; onSelect: () => void }) {
+export function SenderRow({
+  group,
+  onSelect,
+  combined,
+}: {
+  group: SenderGroup;
+  onSelect: () => void;
+  /** Label rows whose mail spans more than one mailbox. */
+  combined?: boolean;
+}) {
   return (
     <li>
       <button className="sender" onClick={onSelect} data-testid="sender-row">
@@ -26,6 +35,9 @@ export function SenderRow({ group, onSelect }: { group: SenderGroup; onSelect: (
           <span className="sender-name">{group.name}</span>
           <span className="sender-sub">
             {group.unsubscribe ? <span className="tag tag-unsub">unsub</span> : null}
+            {combined && group.accounts.length > 1 ? (
+              <span className="tag tag-both">both</span>
+            ) : null}
             {group.unread > 0 ? <span className="tag">{group.unread} unread</span> : null}
             <span>{group.addresses.length > 1 ? `${group.addresses.length} addresses` : group.key}</span>
           </span>

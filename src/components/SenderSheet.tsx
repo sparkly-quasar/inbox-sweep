@@ -1,8 +1,9 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Sheet } from './Sheet';
+import { MessageList } from './MessageList';
 import { openUrl } from '../lib/desktop';
 import type { SenderGroup } from '../lib/group';
-import { formatAge, formatSize } from '../lib/parse';
+import { formatAge, formatSize, type MessageMeta } from '../lib/parse';
 import {
   buildFromCriterion,
   describeAction,
@@ -13,26 +14,38 @@ import {
 
 export interface SenderSheetProps {
   group: SenderGroup;
+  /** Every message in this group, for review before acting. */
+  messages: MessageMeta[];
   busy: boolean;
+  /** True when the combined view is on, so rows are labelled by mailbox. */
+  combined?: boolean;
   onClose: () => void;
-  onBulk: (action: BulkAction) => Promise<void>;
+  /** Acts on exactly these messages, split by mailbox. */
+  onBulk: (action: BulkAction, messagesByAccount: Record<string, string[]>) => Promise<void>;
   onUnsubscribe: () => Promise<UnsubscribeOutcome>;
   onCreateFilter: (plan: FilterPlan) => Promise<void>;
+  loadSnippets?: (ids: string[]) => Promise<Record<string, string>>;
 }
 
 type View = 'actions' | 'confirm' | 'filter';
 
 export function SenderSheet({
   group,
+  messages,
   busy,
+  combined,
   onClose,
   onBulk,
   onUnsubscribe,
   onCreateFilter,
+  loadSnippets,
 }: SenderSheetProps) {
   const [view, setView] = useState<View>('actions');
   const [pending, setPending] = useState<BulkAction | null>(null);
   const [notice, setNotice] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
+  const [reviewing, setReviewing] = useState(false);
+  /** Empty means "everything in the group" — the common case. */
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   // Filter plan state.
   const [skipInbox, setSkipInbox] = useState(true);
@@ -40,6 +53,26 @@ export function SenderSheet({
   const [useLabel, setUseLabel] = useState(false);
   const [labelName, setLabelName] = useState('Bulk');
   const [deleteIt, setDeleteIt] = useState(false);
+
+  /**
+   * What an action will actually touch: the reviewed selection when there is
+   * one, otherwise the whole group. Split by mailbox either way, because each
+   * account needs its own API call.
+   */
+  const target = useMemo(() => {
+    if (selected.size === 0) {
+      return { byAccount: group.messagesByAccount, count: group.count, accounts: group.accounts };
+    }
+    const byAccount: Record<string, string[]> = {};
+    for (const m of messages) {
+      if (selected.has(m.id)) (byAccount[m.account] ??= []).push(m.id);
+    }
+    return {
+      byAccount,
+      count: selected.size,
+      accounts: Object.keys(byAccount).sort(),
+    };
+  }, [selected, messages, group]);
 
   const confirmBulk = (action: BulkAction) => {
     setPending(action);
@@ -50,8 +83,8 @@ export function SenderSheet({
   const runBulk = async () => {
     if (!pending) return;
     try {
-      await onBulk(pending);
-      // Sheet closes on success — the group no longer exists in most cases.
+      await onBulk(pending, target.byAccount);
+      // The sheet closes on success — the group is usually gone.
     } catch (err) {
       setNotice({ tone: 'error', text: err instanceof Error ? err.message : String(err) });
       setView('actions');
@@ -110,6 +143,7 @@ export function SenderSheet({
       {group.addresses.length > 1 ? `${group.addresses.length} addresses · ` : `${group.key} · `}
       {group.count.toLocaleString()} messages · {formatSize(group.size)} · newest{' '}
       {formatAge(group.newest)} ago
+      {group.accounts.length > 1 ? ` · in ${group.accounts.join(' and ')}` : ''}
     </>
   );
 
@@ -117,7 +151,13 @@ export function SenderSheet({
     const destructive = pending === 'trash';
     return (
       <Sheet title={destructive ? 'Move to Trash?' : 'Confirm'} onClose={() => setView('actions')}>
-        <p className="sub">{describeAction(pending, group)}</p>
+        <p className="sub">{describeAction(pending, group, target.count, target.accounts)}</p>
+        {selected.size > 0 ? (
+          <p className="note">
+            Only the {selected.size.toLocaleString()} message
+            {selected.size === 1 ? '' : 's'} you selected. The rest are left alone.
+          </p>
+        ) : null}
         <div className="action-grid">
           <button
             className={`btn btn-block ${destructive ? 'btn-danger' : 'btn-primary'}`}
@@ -126,7 +166,7 @@ export function SenderSheet({
             data-testid="confirm-action"
           >
             {busy ? <span className="spinner" /> : null}
-            {busy ? 'Working…' : destructive ? `Trash ${group.count.toLocaleString()}` : 'Confirm'}
+            {busy ? 'Working…' : destructive ? `Trash ${target.count.toLocaleString()}` : 'Confirm'}
           </button>
           <button className="btn btn-block" onClick={() => setView('actions')} disabled={busy}>
             Cancel
@@ -180,6 +220,12 @@ export function SenderSheet({
           Gmail filters only apply to mail that arrives after they're created. Use Trash or Archive
           above for the {group.count.toLocaleString()} already here.
         </p>
+        {group.accounts.length > 1 ? (
+          <p className="note">
+            This sender appears in {group.accounts.length} mailboxes, so the filter is created in
+            each of them: {group.accounts.join(', ')}.
+          </p>
+        ) : null}
 
         <div className="action-grid" style={{ marginTop: 14 }}>
           <button className="btn btn-primary btn-block" onClick={runCreateFilter} disabled={busy}>
@@ -194,26 +240,64 @@ export function SenderSheet({
     );
   }
 
+  const actionSuffix = selected.size > 0 ? ` ${selected.size.toLocaleString()} selected` : '';
+
   return (
     <Sheet title={group.name} subtitle={subtitle} onClose={onClose}>
       {notice ? <div className={`alert alert-${notice.tone}`}>{notice.text}</div> : null}
+
+      <button
+        className="btn btn-block"
+        onClick={() => setReviewing((r) => !r)}
+        data-testid="toggle-review"
+        style={{ marginBottom: 12 }}
+      >
+        {reviewing ? 'Hide messages' : `Review ${group.count.toLocaleString()} messages…`}
+      </button>
+
+      {reviewing ? (
+        <MessageList
+          messages={messages}
+          selected={selected}
+          showAccounts={combined && group.accounts.length > 1}
+          loadSnippets={loadSnippets}
+          onToggle={(id) =>
+            setSelected((prev) => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            })
+          }
+          onSelectAll={() => setSelected(new Set(messages.map((m) => m.id)))}
+          onClearSelection={() => setSelected(new Set())}
+        />
+      ) : null}
 
       <div className="action-grid">
         <button
           className="btn btn-danger btn-block"
           onClick={() => confirmBulk('trash')}
-          disabled={busy}
+          disabled={busy || target.count === 0}
           data-testid="action-trash"
         >
-          Trash all {group.count.toLocaleString()}
+          Trash {selected.size > 0 ? actionSuffix.trim() : `all ${group.count.toLocaleString()}`}
         </button>
 
         <div className="row">
-          <button className="btn" onClick={() => confirmBulk('archive')} disabled={busy || group.inInbox === 0}>
-            Archive {group.inInbox > 0 ? group.inInbox.toLocaleString() : ''}
+          <button
+            className="btn"
+            onClick={() => confirmBulk('archive')}
+            disabled={busy || (selected.size === 0 && group.inInbox === 0)}
+          >
+            Archive{selected.size > 0 ? actionSuffix : group.inInbox > 0 ? ` ${group.inInbox.toLocaleString()}` : ''}
           </button>
-          <button className="btn" onClick={() => confirmBulk('markRead')} disabled={busy || group.unread === 0}>
-            Mark read {group.unread > 0 ? group.unread.toLocaleString() : ''}
+          <button
+            className="btn"
+            onClick={() => confirmBulk('markRead')}
+            disabled={busy || (selected.size === 0 && group.unread === 0)}
+          >
+            Mark read{selected.size > 0 ? actionSuffix : group.unread > 0 ? ` ${group.unread.toLocaleString()}` : ''}
           </button>
         </div>
 

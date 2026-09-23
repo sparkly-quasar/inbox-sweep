@@ -16,12 +16,17 @@ export interface RawMessage {
   labelIds?: string[];
   sizeEstimate?: number;
   internalDate?: string;
+  /** Gmail's preview line; only requested by the on-demand snippet fetch. */
+  snippet?: string;
   payload?: { headers?: GmailHeader[] };
 }
 
 /** A message reduced to just the fields the app reasons about. */
 export interface MessageMeta {
   id: string;
+  /** Which mailbox this came from. Carried per message so the combined view
+   *  can route an action back to the right account. */
+  account: string;
   /** Lower-cased sender address, e.g. `news@example.com`. */
   email: string;
   /** Display name from the From header, or the address if there wasn't one. */
@@ -36,6 +41,9 @@ export interface MessageMeta {
   unread: boolean;
   inInbox: boolean;
   unsubscribe: UnsubscribeInfo | null;
+  /** Gmail's preview line. Fetched on demand when reviewing a sender, not
+   *  during the scan — on a large mailbox it would multiply the payload. */
+  snippet?: string;
 }
 
 export interface UnsubscribeInfo {
@@ -126,13 +134,14 @@ export function parseUnsubscribe(
 }
 
 /** Reduce a raw Gmail API message to a {@link MessageMeta}. */
-export function toMeta(raw: RawMessage): MessageMeta {
+export function toMeta(raw: RawMessage, account: string): MessageMeta {
   const headers = raw.payload?.headers;
   const { email, name } = parseFrom(header(headers, 'From'));
   const labels = raw.labelIds ?? [];
 
   return {
     id: raw.id,
+    account,
     email,
     name,
     domain: domainOf(email),

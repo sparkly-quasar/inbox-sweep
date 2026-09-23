@@ -9,15 +9,17 @@ import {
   createFilterFromPlan,
   unsubscribe as runUnsubscribe,
   type BulkAction,
+  type Clients,
   type FilterPlan,
 } from './lib/actions';
 import { clearAccount } from './lib/cache';
 import * as desktopAuth from './lib/desktop';
-import { isDesktop, type DesktopStatus } from './lib/desktop';
+import { isDesktop } from './lib/desktop';
 import { SenderRow } from './components/SenderRow';
 import { SenderSheet } from './components/SenderSheet';
 import { SetupScreen } from './components/SetupScreen';
 import { VersionFooter } from './components/VersionFooter';
+import { AccountSwitcher, type Selection } from './components/AccountSwitcher';
 
 const CLIENT_ID_KEY = 'inbox-sweep.clientId';
 const BUILD_TIME_CLIENT_ID = (import.meta.env.VITE_GOOGLE_CLIENT_ID as string | undefined) ?? '';
@@ -43,13 +45,20 @@ export default function App() {
   // Which build we're running in. Fixed for the lifetime of the process, so
   // it's resolved once rather than re-checked on every render.
   const [desktop] = useState(() => isDesktop());
-  const [desktopStatus, setDesktopStatus] = useState<DesktopStatus | null>(null);
+  const [ready, setReady] = useState(!isDesktop());
+  const [configured, setConfigured] = useState(false);
 
   const [clientId, setClientId] = useState<string>(
     () => BUILD_TIME_CLIENT_ID || localStorage.getItem(CLIENT_ID_KEY) || '',
   );
-  const [session, setSession] = useState<Session | null>(null);
-  const [account, setAccount] = useState<string>('');
+
+  /** Live access tokens, keyed by mailbox. */
+  const [sessions, setSessions] = useState<Record<string, Session>>({});
+  /** Every signed-in mailbox, in a stable order. */
+  const [accounts, setAccounts] = useState<string[]>([]);
+  /** Selected mailbox, or null for the combined view. */
+  const [selection, setSelection] = useState<Selection>(null);
+
   const [messages, setMessages] = useState<MessageMeta[]>([]);
   const [progress, setProgress] = useState<ScanProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -64,108 +73,147 @@ export default function App() {
   const abort = useRef<AbortController | null>(null);
   // Guards against an automatic re-authentication cycling forever.
   const reauthed = useRef(false);
-  const client = useMemo(() => (session ? new GmailClient(session.token) : null), [session]);
+
+  /** One API client per signed-in mailbox. */
+  const clients = useMemo<Clients>(() => {
+    const out: Clients = {};
+    for (const [email, session] of Object.entries(sessions)) {
+      out[email] = new GmailClient(session.token);
+    }
+    return out;
+  }, [sessions]);
+
+  /** The mailboxes the current view covers. */
+  const viewing = useMemo(
+    () => (selection === null ? accounts : [selection]).filter((a) => a in clients),
+    [selection, accounts, clients],
+  );
+  const combined = selection === null && accounts.length > 1;
 
   /* ---------- auth ---------- */
 
-  // Desktop: ask Rust what it has stored, then use the refresh token to get
-  // straight into the app. This is the payoff of the native flow — a returning
-  // user never sees a sign-in screen until they revoke access.
+  // Desktop: ask Rust what it has, then refresh every mailbox in parallel so
+  // the combined view is usable immediately rather than one account at a time.
   useEffect(() => {
-    if (!desktop || session) return;
+    if (!desktop) return;
     let cancelled = false;
 
     desktopAuth
       .status()
       .then(async (status) => {
         if (cancelled) return;
-        setDesktopStatus(status);
-        if (!status.signedIn) return;
+        setConfigured(status.configured);
+        setAccounts(status.accounts);
+        setSelection(status.active ?? (status.accounts.length === 1 ? status.accounts[0] : null));
 
-        try {
-          const refreshed = await desktopAuth.refreshSession();
-          if (!cancelled) setSession(refreshed);
-        } catch {
-          // A revoked refresh token is dropped by Rust; fall back to the
-          // sign-in screen rather than surfacing an error the user can't act on.
-          if (!cancelled) setDesktopStatus({ ...status, signedIn: false });
-        }
+        const results = await Promise.allSettled(
+          status.accounts.map((email) => desktopAuth.refreshSession(email)),
+        );
+        if (cancelled) return;
+
+        const live: Record<string, Session> = {};
+        const dead: string[] = [];
+        results.forEach((r, i) => {
+          if (r.status === 'fulfilled') live[r.value.email] = r.value;
+          else dead.push(status.accounts[i]);
+        });
+
+        setSessions(live);
+        // Rust has dropped revoked accounts; mirror that rather than showing
+        // mailboxes that cannot be used.
+        if (dead.length) setAccounts((prev) => prev.filter((a) => !dead.includes(a)));
       })
       .catch((err) => {
         if (!cancelled) setError(explain(err));
+      })
+      .finally(() => {
+        if (!cancelled) setReady(true);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [desktop, session]);
+  }, [desktop]);
 
-  // Browser: try a silent sign-in on load so a returning user lands straight
-  // in the app.
+  // Browser: one mailbox only. Tokens last an hour with no silent refresh, so
+  // juggling several accounts here would mean near-constant re-authentication.
   useEffect(() => {
-    if (desktop || !clientId || session) return;
+    if (desktop || !clientId || accounts.length) return;
     let cancelled = false;
+
     ensureToken(clientId)
-      .then((s) => {
-        if (!cancelled) setSession(s);
+      .then(async (session) => {
+        if (cancelled) return;
+        const profile = await new GmailClient(session.token).getProfile();
+        if (cancelled) return;
+        setSessions({ [profile.emailAddress]: session });
+        setAccounts([profile.emailAddress]);
+        setSelection(profile.emailAddress);
       })
       .catch(() => {
         /* expected on first visit — the user taps sign in */
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [desktop, clientId, session]);
 
-  // Resolve which mailbox we're looking at; the cache is keyed on it.
-  useEffect(() => {
-    if (!client) return;
-    let cancelled = false;
-    client
-      .getProfile()
-      .then((p) => {
-        if (!cancelled) setAccount(p.emailAddress);
-      })
-      .catch((err) => {
-        if (!cancelled) setError(explain(err));
-      });
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, [desktop, clientId, accounts.length]);
 
   const signIn = async () => {
     setError(null);
     try {
-      // Desktop sign-in hands off to the user's real browser and resolves when
-      // they come back, so it can sit pending for a while.
-      setSession(desktop ? await desktopAuth.signIn() : await requestToken(clientId, true));
+      if (desktop) {
+        const added = await desktopAuth.signIn();
+        setSessions((prev) => ({ ...prev, [added.email]: added }));
+        setAccounts((prev) => (prev.includes(added.email) ? prev : [...prev, added.email].sort()));
+        setSelection(added.email);
+      } else {
+        const session = await requestToken(clientId, true);
+        const profile = await new GmailClient(session.token).getProfile();
+        setSessions({ [profile.emailAddress]: session });
+        setAccounts([profile.emailAddress]);
+        setSelection(profile.emailAddress);
+      }
     } catch (err) {
       setError(explain(err));
     }
   };
 
-  const signOut = () => {
+  const signOutOf = async (email: string) => {
     if (desktop) {
-      void desktopAuth.signOut().catch(() => {
-        /* the in-memory session is cleared regardless */
-      });
-      setDesktopStatus((s) => (s ? { ...s, signedIn: false } : s));
+      await desktopAuth.signOut(email).catch(() => undefined);
     } else {
+      const session = sessions[email];
       if (session) revoke(session.token);
       clearSession();
     }
-    setSession(null);
-    setMessages([]);
-    setAccount('');
-    setProgress(null);
+
+    const remaining = accounts.filter((a) => a !== email);
+    setAccounts(remaining);
+    setSessions((prev) => {
+      const next = { ...prev };
+      delete next[email];
+      return next;
+    });
+    // Drop that mailbox's mail from the working set without disturbing the rest.
+    setMessages((prev) => prev.filter((m) => m.account !== email));
+    setSelection((current) =>
+      current === email ? (remaining.length === 1 ? remaining[0] : null) : current,
+    );
+    setSelectedKey(null);
+  };
+
+  const chooseSelection = (next: Selection) => {
+    setSelection(next);
+    setSelectedKey(null);
+    if (desktop) void desktopAuth.setActive(next).catch(() => undefined);
   };
 
   /* ---------- scanning ---------- */
 
   const scan = useCallback(
     async (force = false) => {
-      if (!client || !account) return;
+      if (!viewing.length) return;
       setError(null);
       abort.current?.abort();
       const controller = new AbortController();
@@ -174,15 +222,23 @@ export default function App() {
       const scopeQuery = SCOPES_QUERY.find((s) => s.id === scopeId)?.query ?? '';
 
       try {
-        const result = await scanMailbox(client, account, {
-          query: scopeQuery,
-          force,
-          signal: controller.signal,
-          onProgress: (p) => {
-            // Ignore progress from a scan that has since been superseded.
-            if (abort.current === controller) setProgress(p);
-          },
-        });
+        // Sequential across mailboxes: Gmail's quota is per user, and racing
+        // two full scans mostly earns 429s.
+        const collected: MessageMeta[] = [];
+        for (const email of viewing) {
+          if (controller.signal.aborted) break;
+          const result = await scanMailbox(clients[email], email, {
+            query: scopeQuery,
+            force,
+            signal: controller.signal,
+            onProgress: (p) => {
+              if (abort.current === controller) {
+                setProgress(viewing.length > 1 ? { ...p, message: `${email}: ${p.message ?? ''}` } : p);
+              }
+            },
+          });
+          collected.push(...result);
+        }
 
         // Only the newest scan may publish results. A superseded scan — from
         // StrictMode's double-invoked effect, a scope change, or a rapid
@@ -191,7 +247,7 @@ export default function App() {
         // trashed). Pressing Stop leaves this scan current, so its partial
         // results are still applied, which is what the button should do.
         if (abort.current !== controller) return;
-        setMessages(result);
+        setMessages(collected);
       } catch (err) {
         if (abort.current !== controller) return;
         setError(explain(err));
@@ -206,19 +262,23 @@ export default function App() {
         // somehow survives a refresh.
         if (err instanceof GmailError && err.isExpired && !reauthed.current) {
           reauthed.current = true;
-          clearSession();
-          setSession(null);
+          if (!desktop) {
+            clearSession();
+            setSessions({});
+            setAccounts([]);
+          }
         }
       }
     },
-    [client, account, scopeId],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [clients, scopeId, viewing.join('|'), desktop],
   );
 
-  // Kick off a scan whenever the mailbox or the chosen scope changes.
+  // Rescan whenever the mailbox selection or the chosen scope changes.
   useEffect(() => {
-    if (client && account) void scan(false);
+    if (viewing.length) void scan(false);
     return () => abort.current?.abort();
-  }, [client, account, scopeId, scan]);
+  }, [scan, viewing.length]);
 
   /* ---------- derived data ---------- */
 
@@ -232,23 +292,33 @@ export default function App() {
     () => visible.find((g) => g.key === selectedKey) ?? groups.find((g) => g.key === selectedKey) ?? null,
     [visible, groups, selectedKey],
   );
+  /** The messages behind the open sender, for review. */
+  const selectedMessages = useMemo(() => {
+    if (!selected) return [];
+    const ids = new Set(selected.messageIds);
+    return messages.filter((m) => ids.has(m.id));
+  }, [selected, messages]);
 
   /* ---------- actions ---------- */
 
-  const handleBulk = async (action: BulkAction) => {
-    if (!client || !selected) return;
+  const handleBulk = async (action: BulkAction, messagesByAccount: Record<string, string[]>) => {
     setBusy(true);
     try {
-      const ids = new Set(selected.messageIds);
-      await applyBulkAction(client, account, selected.messageIds, action);
+      await applyBulkAction(clients, messagesByAccount, action);
+
+      const touched = new Set(
+        Object.entries(messagesByAccount).flatMap(([account, ids]) =>
+          ids.map((id) => `${account}:${id}`),
+        ),
+      );
 
       // Update the local view rather than re-scanning: instant, and a re-scan
       // of a big mailbox costs thousands of calls.
       setMessages((prev) =>
         action === 'trash'
-          ? prev.filter((m) => !ids.has(m.id))
+          ? prev.filter((m) => !touched.has(`${m.account}:${m.id}`))
           : prev.map((m) =>
-              ids.has(m.id)
+              touched.has(`${m.account}:${m.id}`)
                 ? {
                     ...m,
                     inInbox: action === 'archive' ? false : m.inInbox,
@@ -269,29 +339,62 @@ export default function App() {
   };
 
   const handleCreateFilter = async (plan: FilterPlan) => {
-    if (!client) throw new Error('Not signed in.');
+    if (!selected) throw new Error('Nothing selected.');
     setBusy(true);
     try {
-      await createFilterFromPlan(client, plan);
+      // Filters live inside a mailbox, so a sender spanning two inboxes needs
+      // one filter in each.
+      for (const account of selected.accounts) {
+        const client = clients[account];
+        if (client) await createFilterFromPlan(client, plan);
+      }
     } finally {
       setBusy(false);
     }
   };
 
+  /** Previews for rows on screen, routed to whichever mailbox owns them. */
+  const loadSnippets = useCallback(
+    async (ids: string[]): Promise<Record<string, string>> => {
+      const wanted = new Set(ids);
+      const byAccount: Record<string, string[]> = {};
+      for (const m of messages) {
+        if (wanted.has(m.id)) (byAccount[m.account] ??= []).push(m.id);
+      }
+
+      const out: Record<string, string> = {};
+      for (const [account, accountIds] of Object.entries(byAccount)) {
+        const client = clients[account];
+        if (!client) continue;
+        Object.assign(out, await client.getSnippets(accountIds));
+      }
+      return out;
+    },
+    [messages, clients],
+  );
+
   const resetCache = async () => {
-    if (!account) return;
-    await clearAccount(account);
+    for (const email of viewing) await clearAccount(email);
     setMessages([]);
     void scan(true);
   };
 
   /* ---------- render ---------- */
 
+  const shellProps = {
+    accounts,
+    selection,
+    onSelect: chooseSelection,
+    onAddAccount: signIn,
+    onSignOutOf: (email: string) => void signOutOf(email),
+    canAddAccount: desktop,
+  };
+
   // Desktop waits for Rust to report what it has stored before choosing a
   // screen, so the user never sees setup flash before their saved session.
-  if (desktop && !session && !desktopStatus) {
+  if (!ready) {
     return (
-      <Shell>
+      <Shell {...shellProps} accounts={[]}>
         <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
           <span className="spinner" />
           <span>Starting…</span>
@@ -300,11 +403,11 @@ export default function App() {
     );
   }
 
-  const needsSetup = desktop ? !desktopStatus?.configured : !clientId;
+  const needsSetup = desktop ? !configured : !clientId;
 
   if (needsSetup) {
     return (
-      <Shell>
+      <Shell {...shellProps} accounts={[]}>
         <SetupScreen
           mode={desktop ? 'desktop' : 'browser'}
           origin={window.location.origin}
@@ -314,7 +417,7 @@ export default function App() {
             if (desktop) {
               try {
                 await desktopAuth.saveClient(id, secret ?? '');
-                setDesktopStatus(await desktopAuth.status());
+                setConfigured(true);
               } catch (err) {
                 setError(explain(err));
               }
@@ -328,9 +431,9 @@ export default function App() {
     );
   }
 
-  if (!session) {
+  if (!accounts.length) {
     return (
-      <Shell>
+      <Shell {...shellProps} accounts={[]}>
         <div className="card">
           <h2 style={{ marginTop: 0 }}>Sign in to Gmail</h2>
           <p className="note" style={{ marginTop: 0 }}>
@@ -348,7 +451,7 @@ export default function App() {
             onClick={async () => {
               if (desktop) {
                 await desktopAuth.forgetAll().catch(() => undefined);
-                setDesktopStatus({ configured: false, signedIn: false });
+                setConfigured(false);
               } else {
                 localStorage.removeItem(CLIENT_ID_KEY);
                 setClientId('');
@@ -367,13 +470,15 @@ export default function App() {
     progress && progress.total > 0 ? Math.min(100, (progress.done / progress.total) * 100) : 0;
 
   return (
-    <Shell
-      account={account}
-      onSignOut={signOut}
-      onRescan={() => void scan(false)}
-      scanning={scanning}
-    >
+    <Shell {...shellProps} onRescan={() => void scan(false)} scanning={scanning}>
       {error ? <div className="alert alert-error">{error}</div> : null}
+
+      {combined ? (
+        <p className="note combined-note" data-testid="combined-note">
+          Showing {accounts.length} mailboxes together. Actions apply to each sender's mail in
+          whichever inbox it came from.
+        </p>
+      ) : null}
 
       <div className="segmented" role="group" aria-label="Mailbox scope">
         {SCOPES_QUERY.map((s) => (
@@ -462,7 +567,7 @@ export default function App() {
       {visible.length > 0 ? (
         <ul className="sender-list">
           {visible.slice(0, 300).map((g) => (
-            <SenderRow key={g.key} group={g} onSelect={() => setSelectedKey(g.key)} />
+            <SenderRow key={g.key} group={g} combined={combined} onSelect={() => setSelectedKey(g.key)} />
           ))}
         </ul>
       ) : !scanning ? (
@@ -489,11 +594,14 @@ export default function App() {
       {selected ? (
         <SenderSheet
           group={selected}
+          messages={selectedMessages}
+          combined={combined}
           busy={busy}
           onClose={() => setSelectedKey(null)}
           onBulk={handleBulk}
           onUnsubscribe={handleUnsubscribe}
           onCreateFilter={handleCreateFilter}
+          loadSnippets={loadSnippets}
         />
       ) : null}
     </Shell>
@@ -501,14 +609,22 @@ export default function App() {
 }
 
 function Shell({
-  account,
-  onSignOut,
+  accounts,
+  selection,
+  onSelect,
+  onAddAccount,
+  onSignOutOf,
+  canAddAccount,
   onRescan,
   scanning,
   children,
 }: {
-  account?: string;
-  onSignOut?: () => void;
+  accounts: string[];
+  selection: Selection;
+  onSelect: (selection: Selection) => void;
+  onAddAccount: () => void;
+  onSignOutOf: (email: string) => void;
+  canAddAccount: boolean;
   onRescan?: () => void;
   scanning?: boolean;
   children: React.ReactNode;
@@ -517,19 +633,22 @@ function Shell({
     <div className="app">
       <header className="header">
         <div className="header-row">
-          <h1 className="brand">
-            Inbox Sweep
-            {account ? <small>{account}</small> : null}
-          </h1>
+          <h1 className="brand">Inbox Sweep</h1>
           {onRescan ? (
             <button className="btn btn-sm" onClick={onRescan} disabled={scanning}>
               Rescan
             </button>
           ) : null}
-          {onSignOut ? (
-            <button className="btn btn-sm" onClick={onSignOut}>
-              Sign out
-            </button>
+          {accounts.length ? (
+            <AccountSwitcher
+              accounts={accounts}
+              selected={selection}
+              onSelect={onSelect}
+              onAdd={onAddAccount}
+              onSignOut={onSignOutOf}
+              canAdd={canAddAccount}
+              busy={scanning}
+            />
           ) : null}
         </div>
       </header>
@@ -554,7 +673,15 @@ function explain(err: unknown): string {
 
   if (err.isExpired) return 'Your Google session expired. Sign in again.';
 
-  if (err.isForbidden) {
+  if (err.isRateLimited) {
+    return (
+      'Gmail is throttling this account — the scan is going faster than your quota allows. ' +
+      'It backs off and retries automatically, so give it a moment. If it keeps happening, ' +
+      'scan a narrower scope than All mail.'
+    );
+  }
+
+  if (err.isPermissionDenied) {
     switch (err.reason) {
       case 'accessNotConfigured':
         return (

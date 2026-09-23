@@ -93,7 +93,7 @@ describe('GmailError', () => {
     expect(new GmailError('x', 429).isForbidden).toBe(false);
   });
 
-  it('treats both as fatal to the operation in flight', () => {
+  it('treats an expired token and a permission refusal as fatal', () => {
     expect(new GmailError('x', 401).isFatal).toBe(true);
     expect(new GmailError('x', 403).isFatal).toBe(true);
     expect(new GmailError('x', 500).isFatal).toBe(false);
@@ -125,6 +125,57 @@ describe('GmailError', () => {
       },
     });
     expect(err.reason).toBe('insufficientPermissions');
+  });
+
+  it('recognises a quota 403 as a throttle, not a refusal', () => {
+    // Gmail reports quota exhaustion as 403 with a rate-limit reason rather
+    // than 429. Classifying it as a permission error kills a long scan that
+    // would have succeeded after a short wait.
+    const err = new GmailError(
+      "Gmail API 403: Quota exceeded for quota metric 'Total Query Cost' and limit " +
+        "'Units per minute per user' of service 'gmail.googleapis.com'",
+      403,
+      {
+        error: {
+          code: 403,
+          message: 'Quota exceeded for quota metric...',
+          errors: [{ reason: 'rateLimitExceeded', domain: 'usageLimits', message: 'Rate Limit Exceeded' }],
+          status: 'RESOURCE_EXHAUSTED',
+        },
+      },
+    );
+
+    expect(err.isRateLimited).toBe(true);
+    expect(err.isPermissionDenied).toBe(false);
+    // Crucially not fatal — the scan must be allowed to back off and continue.
+    expect(err.isFatal).toBe(false);
+  });
+
+  it('recognises a per-user rate limit reason too', () => {
+    const err = new GmailError('Gmail API 403: rate limited', 403, {
+      error: { errors: [{ reason: 'userRateLimitExceeded' }] },
+    });
+    expect(err.isRateLimited).toBe(true);
+    expect(err.isFatal).toBe(false);
+  });
+
+  it('falls back to the message when Google sends no reason', () => {
+    const err = new GmailError('Gmail API 403: Quota exceeded for quota metric', 403);
+    expect(err.isRateLimited).toBe(true);
+  });
+
+  it('still treats a genuine permission 403 as fatal', () => {
+    const err = new GmailError('Gmail API 403: disabled', 403, {
+      error: { errors: [{ reason: 'accessNotConfigured' }] },
+    });
+    expect(err.isRateLimited).toBe(false);
+    expect(err.isPermissionDenied).toBe(true);
+    expect(err.isFatal).toBe(true);
+  });
+
+  it('treats 429 as a throttle', () => {
+    expect(new GmailError('x', 429).isRateLimited).toBe(true);
+    expect(new GmailError('x', 429).isFatal).toBe(false);
   });
 
   it('falls back to the status field, then to null', () => {

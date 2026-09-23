@@ -16,7 +16,18 @@ export interface SenderGroup {
   domain: string;
   /** Distinct sender addresses folded into this group (>1 only in domain mode). */
   addresses: string[];
+  /** Every message id in the group, flattened. */
   messageIds: string[];
+  /**
+   * Message ids split by mailbox.
+   *
+   * In the combined view one sender routinely appears in both inboxes, and
+   * each mailbox needs its own API call with its own token — so the split has
+   * to survive grouping rather than be recovered afterwards.
+   */
+  messagesByAccount: Record<string, string[]>;
+  /** Mailboxes that contributed, for the badge in the combined view. */
+  accounts: string[];
   count: number;
   /** Summed Gmail size estimates, bytes. */
   size: number;
@@ -57,6 +68,8 @@ export function groupMessages(messages: MessageMeta[], by: GroupBy): SenderGroup
         domain: m.domain,
         addresses: [],
         messageIds: [],
+        messagesByAccount: {},
+        accounts: [],
         count: 0,
         size: 0,
         unread: 0,
@@ -72,6 +85,7 @@ export function groupMessages(messages: MessageMeta[], by: GroupBy): SenderGroup
     }
 
     g.messageIds.push(m.id);
+    (g.messagesByAccount[m.account] ??= []).push(m.id);
     g.count++;
     g.size += m.size;
     if (m.unread) g.unread++;
@@ -103,6 +117,7 @@ export function groupMessages(messages: MessageMeta[], by: GroupBy): SenderGroup
   for (const [key, set] of addressSets) {
     const g = groups.get(key)!;
     g.addresses = [...set].sort();
+    g.accounts = Object.keys(g.messagesByAccount).sort();
     if (!g.name) g.name = key;
   }
 

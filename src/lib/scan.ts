@@ -107,7 +107,7 @@ export async function scanMailbox(
     });
 
     for (const r of raw) {
-      const meta = toMeta(r);
+      const meta = toMeta(r, account);
       fetched.push(meta);
       unsaved.push(meta);
       if (unsaved.length >= PERSIST_EVERY) {

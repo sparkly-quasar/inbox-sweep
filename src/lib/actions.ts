@@ -12,42 +12,62 @@ export type BulkAction = 'archive' | 'trash' | 'markRead';
 export interface BulkResult {
   action: BulkAction;
   affected: number;
+  /** Mailboxes that were touched, for the confirmation message. */
+  accounts: string[];
 }
 
+/** One signed-in mailbox's API client, keyed by address. */
+export type Clients = Record<string, GmailClient>;
+
 /**
- * Apply a bulk action to a group's messages and reconcile the local cache.
+ * Apply a bulk action across however many mailboxes the selection spans.
+ *
+ * Each mailbox is a separate Gmail account with its own token, so a sender that
+ * appears in both inboxes needs one call per account. Accounts are handled in
+ * sequence rather than in parallel: the quota is per user, and a partial
+ * failure should leave a clear picture of what did happen.
  *
  * Trash uses the TRASH label rather than permanent delete, so everything here
  * is recoverable from Gmail for 30 days.
  */
 export async function applyBulkAction(
-  client: GmailClient,
-  account: string,
-  ids: string[],
+  clients: Clients,
+  messagesByAccount: Record<string, string[]>,
   action: BulkAction,
   onProgress?: (done: number) => void,
 ): Promise<BulkResult> {
-  if (!ids.length) return { action, affected: 0 };
+  const entries = Object.entries(messagesByAccount).filter(([, ids]) => ids.length > 0);
+  if (!entries.length) return { action, affected: 0, accounts: [] };
 
-  switch (action) {
-    case 'trash':
-      await client.trash(ids, onProgress);
-      // Trashed mail is gone from the working set; forget it locally.
-      await removeCached(account, ids);
-      break;
+  let done = 0;
+  const touched: string[] = [];
 
-    case 'archive':
-      await client.batchModify(ids, [], ['INBOX']);
-      onProgress?.(ids.length);
-      break;
+  for (const [account, ids] of entries) {
+    const client = clients[account];
+    if (!client) {
+      throw new Error(`Not signed in to ${account}, so its messages were left alone.`);
+    }
 
-    case 'markRead':
-      await client.batchModify(ids, [], ['UNREAD']);
-      onProgress?.(ids.length);
-      break;
+    switch (action) {
+      case 'trash':
+        await client.trash(ids);
+        // Trashed mail is gone from the working set; forget it locally.
+        await removeCached(account, ids);
+        break;
+      case 'archive':
+        await client.batchModify(ids, [], ['INBOX']);
+        break;
+      case 'markRead':
+        await client.batchModify(ids, [], ['UNREAD']);
+        break;
+    }
+
+    touched.push(account);
+    done += ids.length;
+    onProgress?.(done);
   }
 
-  return { action, affected: ids.length };
+  return { action, affected: done, accounts: touched };
 }
 
 /** What a filter should do with future mail from a sender. */
@@ -169,16 +189,29 @@ export async function unsubscribe(info: UnsubscribeInfo | null): Promise<Unsubsc
   return { kind: 'unavailable' };
 }
 
-/** Summarise what a bulk action will do, for the confirmation sheet. */
-export function describeAction(action: BulkAction, group: SenderGroup): string {
-  const n = group.count.toLocaleString();
-  const plural = group.count === 1 ? 'message' : 'messages';
+/**
+ * Summarise what a bulk action will do, for the confirmation sheet.
+ *
+ * `count` is passed rather than read off the group, because the user may have
+ * selected a subset of the messages after reviewing them.
+ */
+export function describeAction(
+  action: BulkAction,
+  group: SenderGroup,
+  count: number,
+  accounts: string[] = group.accounts,
+): string {
+  const n = count.toLocaleString();
+  const plural = count === 1 ? 'message' : 'messages';
+  // Spanning two inboxes is worth saying out loud before anything is deleted.
+  const where = accounts.length > 1 ? ` across ${accounts.join(' and ')}` : '';
+
   switch (action) {
     case 'trash':
-      return `Move ${n} ${plural} from ${group.name} to Trash. Recoverable in Gmail for 30 days.`;
+      return `Move ${n} ${plural} from ${group.name}${where} to Trash. Recoverable in Gmail for 30 days.`;
     case 'archive':
-      return `Remove ${n} ${plural} from ${group.name} from your inbox. They stay searchable in All Mail.`;
+      return `Remove ${n} ${plural} from ${group.name}${where} from your inbox. They stay searchable in All Mail.`;
     case 'markRead':
-      return `Mark ${n} ${plural} from ${group.name} as read.`;
+      return `Mark ${n} ${plural} from ${group.name}${where} as read.`;
   }
 }

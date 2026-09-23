@@ -6,6 +6,7 @@ const DAY = 86_400_000;
 
 function msg(over: Partial<MessageMeta> & { id: string; email: string }): MessageMeta {
   return {
+    account: 'me@example.com',
     name: over.email,
     domain: over.email.split('@')[1] ?? '',
     subject: '',

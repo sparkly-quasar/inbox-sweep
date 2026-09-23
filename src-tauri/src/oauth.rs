@@ -152,9 +152,13 @@ pub fn query_params(target: &str) -> HashMap<String, String> {
 
 /// Build the Google consent URL.
 ///
-/// `access_type=offline` plus `prompt=consent` is what makes Google issue a
-/// refresh token; without both, a repeat sign-in returns only an access token
+/// `access_type=offline` plus `consent` in the prompt is what makes Google issue
+/// a refresh token; without both, a repeat sign-in returns only an access token
 /// and the app would be back to hourly re-authentication.
+///
+/// `select_account` is what makes multiple mailboxes possible at all. Without
+/// it Google silently reuses whichever account the browser is already signed
+/// into, so "add another account" would keep returning the same one.
 pub fn build_auth_url(
     client_id: &str,
     redirect_uri: &str,
@@ -171,7 +175,7 @@ pub fn build_auth_url(
         ("code_challenge_method", "S256"),
         ("state", state),
         ("access_type", "offline"),
-        ("prompt", "consent"),
+        ("prompt", "select_account consent"),
     ];
 
     let query = params
@@ -387,6 +391,44 @@ pub async fn sign_in(
     .await
 }
 
+/// Ask Gmail which mailbox an access token belongs to.
+///
+/// The token itself does not say. Keying accounts by address — rather than by
+/// insertion order — is what lets a repeat sign-in replace an account instead
+/// of duplicating it, and what lets the UI label the switcher.
+pub async fn fetch_email(access_token: &str) -> Result<String, OAuthError> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Profile {
+        email_address: String,
+    }
+
+    let response = reqwest::Client::new()
+        .get("https://gmail.googleapis.com/gmail/v1/users/me/profile?fields=emailAddress")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| OAuthError::Http(e.to_string()))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let detail = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v["error"]["message"].as_str().map(str::to_string))
+            .unwrap_or_else(|| format!("HTTP {status}"));
+        // A 403 here is almost always the Gmail API being disabled, which the
+        // frontend explains far better than a raw status would.
+        return Err(OAuthError::Token(detail));
+    }
+
+    let profile: Profile = response
+        .json()
+        .await
+        .map_err(|e| OAuthError::Http(e.to_string()))?;
+    Ok(profile.email_address)
+}
+
 /// Trade a stored refresh token for a fresh access token.
 pub async fn refresh(
     client_id: &str,
@@ -482,7 +524,7 @@ mod tests {
         assert!(url.contains("state=st"));
         // Both are required for Google to return a refresh token.
         assert!(url.contains("access_type=offline"));
-        assert!(url.contains("prompt=consent"));
+        assert!(url.contains("prompt=select_account%20consent"));
         // The redirect and scopes must be encoded, not raw.
         assert!(url.contains("redirect_uri=http%3A%2F%2F127.0.0.1%3A1234"));
         assert!(url.contains("scope=scope.a%20scope.b"));

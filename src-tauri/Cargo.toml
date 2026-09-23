@@ -1,6 +1,6 @@
 [package]
 name = "inbox-sweep"
-version = "0.1.2"
+version = "0.2.0"
 description = "Bulk Gmail cleanup"
 authors = ["sparkly-quasar"]
 edition = "2021"

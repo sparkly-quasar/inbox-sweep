@@ -55,7 +55,9 @@ export async function loadCached(account: string): Promise<MessageMeta[]> {
     const store = tx(db, 'readonly');
     const rows = await promisify(store.index('account').getAll(account) as IDBRequest<CacheRow[]>);
     db.close();
-    return rows.map((r) => r.meta);
+    // Rows written before MessageMeta carried an account still have it on the
+    // row, so fill it in rather than making the user rescan.
+    return rows.map((r) => ({ ...r.meta, account: r.meta.account || r.account }));
   } catch (err) {
     console.warn('Cache read failed; continuing without it', err);
     return [];
