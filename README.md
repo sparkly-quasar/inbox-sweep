@@ -129,7 +129,7 @@ variables → Actions):
 | Secret | Value |
 | --- | --- |
 | `TAURI_SIGNING_PRIVATE_KEY` | Contents of the minisign private key |
-| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Its password — empty string if the key has none |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | Its password. GitHub will not save an empty secret, so enter a single space if the key has none — the workflow treats a whitespace-only value as no password |
 
 The build fails loudly when the key is missing rather than publishing a release
 nobody can update to. The matching public key lives in `src-tauri/tauri.conf.json`
